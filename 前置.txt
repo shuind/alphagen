@@ -1,0 +1,8 @@
+py -3.8 -m venv .venv
+.\.venv\Scripts\activate
+
+numpy==1.24.4
+pip install -r requirements.txt
+
+.\.venv\Scripts\Activate.ps1
+python train_maskable_ppo.py --seed=1 --pool=20 --code=mini200 --step=50000

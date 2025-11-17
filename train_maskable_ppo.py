@@ -91,13 +91,13 @@ class CustomCallback(BaseCallback):
 
 def main(
     seed: int = 0,
-    instruments: str = "csi300",
+    instruments: str = "all",
     pool_capacity: int = 10,
     steps: int = 200_000
 ):
     reseed_everything(seed)
 
-    device = torch.device('cuda:0')
+    device = torch.device('cpu')
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
 
@@ -129,7 +129,7 @@ def main(
     checkpoint_callback = CustomCallback(
         save_freq=10000,
         show_freq=10000,
-        save_path='/path/for/checkpoints',
+        save_path=r"C:\Users\qdz\Desktop\alphagen\checkpoints",
         valid_calculator=calculator_valid,
         test_calculator=calculator_test,
         name_prefix=name_prefix,
@@ -152,7 +152,7 @@ def main(
         gamma=1.,
         ent_coef=0.01,
         batch_size=128,
-        tensorboard_log='/path/for/tb/log',
+        tensorboard_log=r"C:\Users\qdz\Desktop\alphagen\log",
         device=device,
         verbose=1,
     )

@@ -10,3 +10,6 @@ logs/
 tb_logs/
 get_baostock_data.ipynb
 get_baostock_data.py
+.venv/ 
+ 
+ 

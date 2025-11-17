@@ -24,7 +24,7 @@ class StockData:
                  max_backtrack_days: int = 100,
                  max_future_days: int = 30,
                  features: Optional[List[FeatureType]] = None,
-                 device: torch.device = torch.device('cuda:0')) -> None:
+                 device: torch.device = torch.device('cpu')) -> None:
         self._init_qlib()
 
         self._instrument = instrument
@@ -42,7 +42,7 @@ class StockData:
             return
         import qlib
         from qlib.config import REG_CN
-        qlib.init(provider_uri="~/.qlib/qlib_data/cn_data_rolling", region=REG_CN)
+        qlib.init(provider_uri=r"C:\Users\qdz\.qlib\qlib_data\cn_data_baostock_fwdadj", region=REG_CN)
         cls._qlib_initialized = True
 
     def _load_exprs(self, exprs: Union[str, List[str]]) -> pd.DataFrame:
