@@ -1,10 +1,11 @@
 import json
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from datetime import datetime
 import fire
 
 import numpy as np
+import torch
 from sb3_contrib.ppo_mask import MaskablePPO
 from stable_baselines3.common.callbacks import BaseCallback
 from alphagen.data.calculator import AlphaCalculator
@@ -16,6 +17,7 @@ from alphagen.rl.policy import LSTMSharedNet
 from alphagen.utils.random import reseed_everything
 from alphagen.rl.env.core import AlphaEnvCore
 from alphagen_qlib.calculator import QLibStockDataCalculator
+from alphagen_qlib.compat import patch_all
 
 
 class CustomCallback(BaseCallback):
@@ -61,7 +63,7 @@ class CustomCallback(BaseCallback):
         self.save_checkpoint()
 
     def save_checkpoint(self):
-        path = os.path.join(self.save_path, f'{self.name_prefix}_{self.timestamp}', f'{self.num_timesteps}_steps')
+        path = os.path.join(self.save_path, f'{self.num_timesteps}_steps')
         self.model.save(path)   # type: ignore
         if self.verbose > 1:
             print(f'Saving model checkpoint to {path}')
@@ -91,24 +93,59 @@ class CustomCallback(BaseCallback):
 
 def main(
     seed: int = 0,
-    instruments: str = "csi300",
-    pool_capacity: int = 10,
-    steps: int = 200_000
+    market: str = "csi300",
+    pool_capacity: int = 50,
+    steps: int = 200_000,
+    provider_uri: str = "",
+    ckpt_dir: str = "",
+    tb_dir: str = "",
+    device: str = "auto",
 ):
     reseed_everything(seed)
 
-    device = torch.device('cuda:0')
+    resolved_provider_uri = (
+        provider_uri
+        or os.environ.get("QLIB_PROVIDER_URI", "")
+        or "/kaggle/input/baostock/cn_data_baostock_fwdadj"
+    )
+    print(f"Resolved provider_uri: {resolved_provider_uri}")
+    patch_all(resolved_provider_uri)
+    import qlib
+    from qlib.constant import REG_CN
+
+    qlib.init(provider_uri=resolved_provider_uri, region=REG_CN)
+
+    resolved_ckpt_dir = (
+        ckpt_dir
+        or os.environ.get("CKPT_DIR", "")
+        or "/kaggle/working/checkpoints"
+    )
+    resolved_tb_dir = (
+        tb_dir
+        or os.environ.get("TB_DIR", "")
+        or "/kaggle/working/tb_log"
+    )
+    os.makedirs(resolved_ckpt_dir, exist_ok=True)
+    os.makedirs(resolved_tb_dir, exist_ok=True)
+
+    if device == "auto":
+        resolved_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    else:
+        resolved_device = device
+    print(f"Resolved device: {resolved_device}")
+    device = torch.device(resolved_device)
+
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
 
     # You can re-implement AlphaCalculator instead of using QLibStockDataCalculator.
-    data_train = StockData(instrument=instruments,
+    data_train = StockData(instrument=market,
                            start_time='2010-01-01',
                            end_time='2019-12-31')
-    data_valid = StockData(instrument=instruments,
+    data_valid = StockData(instrument=market,
                            start_time='2020-01-01',
                            end_time='2020-12-31')
-    data_test = StockData(instrument=instruments,
+    data_test = StockData(instrument=market,
                           start_time='2021-01-01',
                           end_time='2022-12-31')
     calculator_train = QLibStockDataCalculator(data_train, target)
@@ -123,13 +160,17 @@ def main(
     )
     env = AlphaEnv(pool=pool, device=device, print_expr=True)
 
-    name_prefix = f"new_{instruments}_{pool_capacity}_{seed}"
+    name_prefix = f"new_{market}_{pool_capacity}_{seed}"
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    ckpt_run_dir = os.path.join(resolved_ckpt_dir, f"{name_prefix}_{timestamp}")
+    tb_run_dir = os.path.join(resolved_tb_dir, f"{name_prefix}_{timestamp}")
+    os.makedirs(ckpt_run_dir, exist_ok=True)
+    os.makedirs(tb_run_dir, exist_ok=True)
 
     checkpoint_callback = CustomCallback(
         save_freq=10000,
         show_freq=10000,
-        save_path='/path/for/checkpoints',
+        save_path=ckpt_run_dir,
         valid_calculator=calculator_valid,
         test_calculator=calculator_test,
         name_prefix=name_prefix,
@@ -152,7 +193,7 @@ def main(
         gamma=1.,
         ent_coef=0.01,
         batch_size=128,
-        tensorboard_log='/path/for/tb/log',
+        tensorboard_log=tb_run_dir,
         device=device,
         verbose=1,
     )
