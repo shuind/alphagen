@@ -10,3 +10,8 @@ logs/
 tb_logs/
 get_baostock_data.ipynb
 get_baostock_data.py
+local_ui/
+outputs/
+*.zip
+download_kaggle_output.ps1
+kaggle/

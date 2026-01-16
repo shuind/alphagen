@@ -1,4 +1,6 @@
+import csv
 import json
+import math
 import os
 from typing import Optional, Tuple, Union
 from datetime import datetime
@@ -20,11 +22,35 @@ from alphagen_qlib.calculator import QLibStockDataCalculator
 from alphagen_qlib.compat import patch_all
 
 
+def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
+    if not run_dir:
+        return
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "metrics_step.csv")
+    fieldnames = [
+        "step",
+        "pool_size",
+        "best_ic",
+        "best_rankic",
+        "mean_ic",
+        "mean_rankic",
+    ]
+    write_header = not os.path.isfile(path)
+    row = {name: metrics.get(name, math.nan) for name in fieldnames}
+    row["step"] = step
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 class CustomCallback(BaseCallback):
     def __init__(self,
                  save_freq: int,
                  show_freq: int,
                  save_path: str,
+                 run_dir: Optional[str],
                  valid_calculator: AlphaCalculator,
                  test_calculator: AlphaCalculator,
                  name_prefix: str = 'rl_model',
@@ -34,6 +60,7 @@ class CustomCallback(BaseCallback):
         self.save_freq = save_freq
         self.show_freq = show_freq
         self.save_path = save_path
+        self.run_dir = run_dir
         self.name_prefix = name_prefix
 
         self.valid_calculator = valid_calculator
@@ -47,6 +74,8 @@ class CustomCallback(BaseCallback):
     def _init_callback(self) -> None:
         if self.save_path is not None:
             os.makedirs(self.save_path, exist_ok=True)
+        if self.run_dir is not None:
+            os.makedirs(self.run_dir, exist_ok=True)
 
     def _on_step(self) -> bool:
         return True
@@ -60,6 +89,22 @@ class CustomCallback(BaseCallback):
         ic_test, rank_ic_test = self.pool.test_ensemble(self.test_calculator)
         self.logger.record('test/ic', ic_test)
         self.logger.record('test/rank_ic', rank_ic_test)
+        pool_size = getattr(self.pool, "size", math.nan)
+        if isinstance(pool_size, (int, np.integer)) and pool_size > 0 and hasattr(self.pool, "single_ics"):
+            mean_ic = float(np.nanmean(self.pool.single_ics[:pool_size]))
+        else:
+            mean_ic = math.nan
+        log_metrics_csv(
+            self.run_dir or self.save_path,
+            self.num_timesteps,
+            {
+                "pool_size": pool_size,
+                "best_ic": getattr(self.pool, "best_ic_ret", math.nan),
+                "best_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
+                "mean_ic": mean_ic,
+                "mean_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
+            },
+        )
         self.save_checkpoint()
 
     def save_checkpoint(self):
@@ -166,11 +211,36 @@ def main(
     tb_run_dir = os.path.join(resolved_tb_dir, f"{name_prefix}_{timestamp}")
     os.makedirs(ckpt_run_dir, exist_ok=True)
     os.makedirs(tb_run_dir, exist_ok=True)
+    run_root_dir = os.path.join(os.path.dirname(resolved_ckpt_dir), f"{name_prefix}_{timestamp}")
+    os.makedirs(run_root_dir, exist_ok=True)
+    meta_path = os.path.join(run_root_dir, "run_meta.json")
+    try:
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "run_id": f"{name_prefix}_{timestamp}",
+                    "market": market,
+                    "seed": seed,
+                    "pool_capacity": pool_capacity,
+                    "steps": steps,
+                    "timestamp": timestamp,
+                    "ckpt_run_dir": ckpt_run_dir,
+                    "tb_run_dir": tb_run_dir,
+                    "run_root_dir": run_root_dir,
+                    "provider_uri": resolved_provider_uri,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+    except Exception:
+        pass
 
     checkpoint_callback = CustomCallback(
         save_freq=10000,
         show_freq=10000,
         save_path=ckpt_run_dir,
+        run_dir=run_root_dir,
         valid_calculator=calculator_valid,
         test_calculator=calculator_test,
         name_prefix=name_prefix,

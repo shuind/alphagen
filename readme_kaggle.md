@@ -17,17 +17,22 @@ Kaggle 运行说明（中文）
 
 2) 克隆仓库并切换分支
 ```bash
-git clone https://github.com/shuind/alphagen.git
-cd alphagen
-git checkout exp/kaggle_qlib_fix
+!git clone https://github.com/shuind/alphagen.git
+%cd alphagen
+!git checkout exp/kaggle_qlib_fix
+
 
 ```
 
 3) 可选环境变量
 ```bash
-export QLIB_PROVIDER_URI=/kaggle/input/baostock/cn_data_baostock_fwdadj
-export CKPT_DIR=/kaggle/working/checkpoints
-export TB_DIR=/kaggle/working/tb_log
+import os
+os.environ["QLIB_PROVIDER_URI"] = "/kaggle/input/baostock/cn_data_baostock_fwdadj"
+os.environ["CKPT_DIR"] = "/kaggle/working/checkpoints"
+os.environ["TB_DIR"] = "/kaggle/working/tb_log"
+print("env set:", os.environ["QLIB_PROVIDER_URI"])
+
+
 ```
 
 4) 推荐运行方式
