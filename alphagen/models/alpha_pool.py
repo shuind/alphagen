@@ -1,12 +1,13 @@
 from itertools import count
 import math
-from typing import List, Optional, Tuple, Set
+from typing import Dict, List, Optional, Tuple, Set
 from abc import ABCMeta, abstractmethod
 
 import numpy as np
 import torch
 from torch import Tensor
 from alphagen.data.calculator import AlphaCalculator
+from alphagen.config import MAX_EXPR_LENGTH
 
 from alphagen.data.expression import Expression
 from alphagen.utils.correlation import batch_pearsonr, batch_spearmanr
@@ -29,7 +30,7 @@ class AlphaPoolBase(metaclass=ABCMeta):
     def to_dict(self) -> dict: ...
 
     @abstractmethod
-    def try_new_expr(self, expr: Expression) -> float: ...
+    def try_new_expr(self, expr: Expression, token_seq: Optional[List[str]] = None) -> Tuple[float, Dict]: ...
 
     @abstractmethod
     def test_ensemble(self, calculator: AlphaCalculator) -> Tuple[float, float]: ...
@@ -42,12 +43,20 @@ class AlphaPool(AlphaPoolBase):
         calculator: AlphaCalculator,
         ic_lower_bound: Optional[float] = None,
         l1_alpha: float = 5e-3,
+        reward_mode: str = "re",
+        re_mode: str = "ensemble",
+        lambda_ri: float = 0.0,
+        ri_topk: int = 5,
+        ri_struct_topk: int = 5,
+        ri_reg_l0: Optional[float] = None,
         device: torch.device = torch.device('cpu')
     ):
         super().__init__(capacity, calculator, device)
 
         self.size: int = 0
         self.exprs: List[Optional[Expression]] = [None for _ in range(capacity + 1)]
+        self.expr_tokens: List[Optional[List[str]]] = [None for _ in range(capacity + 1)]
+        self.expr_bigrams: List[Optional[Set[Tuple[str, str]]]] = [None for _ in range(capacity + 1)]
         self.single_ics: np.ndarray = np.zeros(capacity + 1)
         self.mutual_ics: np.ndarray = np.identity(capacity + 1)
         self.weights: np.ndarray = np.zeros(capacity + 1)
@@ -55,6 +64,12 @@ class AlphaPool(AlphaPoolBase):
 
         self.ic_lower_bound = ic_lower_bound or -1.
         self.l1_alpha = l1_alpha
+        self.reward_mode = reward_mode
+        self.re_mode = re_mode
+        self.lambda_ri = lambda_ri
+        self.ri_topk = ri_topk
+        self.ri_struct_topk = ri_struct_topk
+        self.ri_reg_l0 = float(ri_reg_l0) if ri_reg_l0 is not None else float(int(0.7 * MAX_EXPR_LENGTH))
 
         self.eval_cnt = 0
 
@@ -73,12 +88,28 @@ class AlphaPool(AlphaPoolBase):
             "weights": list(self.weights[:self.size])
         }
 
-    def try_new_expr(self, expr: Expression) -> float:
+    def try_new_expr(self, expr: Expression, token_seq: Optional[List[str]] = None) -> Tuple[float, Dict]:
         ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=0.99)
         if ic_ret is None or ic_mut is None or np.isnan(ic_ret) or np.isnan(ic_mut).any():
-            return 0.
+            info = {
+                "re": 0.0,
+                "ri_func": 0.0,
+                "ri_struct": 0.0,
+                "ri_reg": 0.0,
+                "reward_total": 0.0,
+                "reward_pool": 0.0,
+                "ic_ensemble": 0.0,
+                "increment": 0.0,
+                "invalid": True,
+            }
+            return 0.0, info
 
-        self._add_factor(expr, ic_ret, ic_mut)
+        ri_func = self._calc_ri_func(ic_mut) if self._use_ri_func else 0.0
+        ri_struct = self._calc_ri_struct(token_seq) if self._use_ri_struct else 0.0
+        ri_reg = self._calc_ri_reg(token_seq) if self._use_ri_reg else 0.0
+
+        prev_best_ic_ret = self.best_ic_ret
+        self._add_factor(expr, ic_ret, ic_mut, token_seq)
         if self.size > 1:
             new_weights = self._optimize(alpha=self.l1_alpha, lr=5e-4, n_iter=500)
             worst_idx = np.argmin(np.abs(new_weights))
@@ -87,17 +118,31 @@ class AlphaPool(AlphaPoolBase):
             self._pop()
 
         new_ic_ret = self.evaluate_ensemble()
-        increment = new_ic_ret - self.best_ic_ret
+        increment = new_ic_ret - prev_best_ic_ret
         if increment > 0:
             self.best_ic_ret = new_ic_ret
         self.eval_cnt += 1
-        return new_ic_ret
+        re = self._compose_re(new_ic_ret, increment)
+        reward_total = self._compose_reward(re, ri_func, ri_struct, ri_reg)
+        info = {
+            "re": float(re),
+            "ri_func": float(ri_func),
+            "ri_struct": float(ri_struct),
+            "ri_reg": float(ri_reg),
+            "reward_total": float(reward_total),
+            "reward_pool": float(reward_total),
+            "ic_ensemble": float(new_ic_ret),
+            "increment": float(increment),
+            "ic_single": float(ic_ret),
+            "re_mode": self.re_mode,
+        }
+        return reward_total, info
 
     def force_load_exprs(self, exprs: List[Expression]) -> None:
         for expr in exprs:
             ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=None)
             assert ic_ret is not None and ic_mut is not None
-            self._add_factor(expr, ic_ret, ic_mut)
+            self._add_factor(expr, ic_ret, ic_mut, None)
             assert self.size <= self.capacity
         self._optimize(alpha=self.l1_alpha, lr=5e-4, n_iter=500)
 
@@ -182,12 +227,18 @@ class AlphaPool(AlphaPoolBase):
         self,
         expr: Expression,
         ic_ret: float,
-        ic_mut: List[float]
+        ic_mut: List[float],
+        token_seq: Optional[List[str]]
     ):
         if self._under_thres_alpha and self.size == 1:
             self._pop()
         n = self.size
         self.exprs[n] = expr
+        self.expr_tokens[n] = token_seq
+        if token_seq is not None and len(token_seq) >= 2:
+            self.expr_bigrams[n] = self._token_bigrams(token_seq)
+        else:
+            self.expr_bigrams[n] = None
         self.single_ics[n] = ic_ret
         for i in range(n):
             self.mutual_ics[i][n] = self.mutual_ics[n][i] = ic_mut[i]
@@ -205,7 +256,91 @@ class AlphaPool(AlphaPoolBase):
         if i == j:
             return
         self.exprs[i], self.exprs[j] = self.exprs[j], self.exprs[i]
+        self.expr_tokens[i], self.expr_tokens[j] = self.expr_tokens[j], self.expr_tokens[i]
+        self.expr_bigrams[i], self.expr_bigrams[j] = self.expr_bigrams[j], self.expr_bigrams[i]
         self.single_ics[i], self.single_ics[j] = self.single_ics[j], self.single_ics[i]
         self.mutual_ics[:, [i, j]] = self.mutual_ics[:, [j, i]]
         self.mutual_ics[[i, j], :] = self.mutual_ics[[j, i], :]
         self.weights[i], self.weights[j] = self.weights[j], self.weights[i]
+
+    @property
+    def _use_ri_func(self) -> bool:
+        return "func" in self.reward_mode or "all" in self.reward_mode
+
+    @property
+    def _use_ri_struct(self) -> bool:
+        return "struct" in self.reward_mode or "all" in self.reward_mode
+
+    @property
+    def _use_ri_reg(self) -> bool:
+        return "reg" in self.reward_mode or "all" in self.reward_mode
+
+    def _compose_re(self, ic_ensemble: float, increment: float) -> float:
+        if self.re_mode == "delta_best":
+            return increment
+        return ic_ensemble
+
+    def _compose_reward(
+        self,
+        re: float,
+        ri_func: float,
+        ri_struct: float,
+        ri_reg: float
+    ) -> float:
+        if self.reward_mode == "re":
+            return re
+        ri_sum = 0.0
+        if self._use_ri_func:
+            ri_sum += ri_func
+        if self._use_ri_struct:
+            ri_sum += ri_struct
+        if self._use_ri_reg:
+            ri_sum += ri_reg
+        return re + self.lambda_ri * ri_sum
+
+    def _calc_ri_func(self, ic_mut: List[float]) -> float:
+        if not ic_mut:
+            return 0.0
+        valid = [abs(x) for x in ic_mut if not np.isnan(x)]
+        if not valid:
+            return 0.0
+        k = max(1, min(self.ri_topk, len(valid)))
+        topk = sorted(valid)[-k:]
+        return -float(np.mean(topk))
+
+    def _calc_ri_struct(self, token_seq: Optional[List[str]]) -> float:
+        if token_seq is None or len(token_seq) < 2 or self.size == 0:
+            return 0.0
+        new_bigrams = self._token_bigrams(token_seq)
+        if not new_bigrams:
+            return 0.0
+        max_jaccard = 0.0
+        pool_size = self.size
+        if pool_size <= 0:
+            return 0.0
+        topk = max(1, min(self.ri_struct_topk, pool_size))
+        weight_scores = np.abs(self.weights[:pool_size])
+        idxs = np.argsort(weight_scores)[-topk:]
+        for i in idxs:
+            old_bigrams = self.expr_bigrams[i]
+            if not old_bigrams:
+                continue
+            inter = len(new_bigrams & old_bigrams)
+            union = len(new_bigrams | old_bigrams)
+            if union == 0:
+                continue
+            max_jaccard = max(max_jaccard, inter / union)
+        return 1.0 - max_jaccard
+
+    def _calc_ri_reg(self, token_seq: Optional[List[str]]) -> float:
+        if token_seq is None:
+            return 0.0
+        length = len(token_seq)
+        if length <= 0:
+            return 0.0
+        l0 = max(1.0, float(self.ri_reg_l0))
+        return -max(0.0, (length - l0) / l0)
+
+    @staticmethod
+    def _token_bigrams(token_seq: List[str]) -> Set[Tuple[str, str]]:
+        return set(zip(token_seq[:-1], token_seq[1:]))

@@ -1,10 +1,10 @@
+import argparse
 import csv
 import json
 import math
 import os
-from typing import Optional, Tuple, Union
+from typing import Optional, Union, List
 from datetime import datetime
-import fire
 
 import numpy as np
 import torch
@@ -15,11 +15,12 @@ from alphagen.data.calculator import AlphaCalculator
 from alphagen.data.expression import *
 from alphagen.models.alpha_pool import AlphaPool, AlphaPoolBase
 from alphagen.rl.env.wrapper import AlphaEnv
-from alphagen.rl.policy import LSTMSharedNet
+from alphagen.rl.policy import LSTMSharedNet, TransformerSharedNet
 from alphagen.utils.random import reseed_everything
 from alphagen.rl.env.core import AlphaEnvCore
 from alphagen_qlib.calculator import QLibStockDataCalculator
 from alphagen_qlib.compat import patch_all
+from alphagen.config import REWARD_PER_STEP
 
 
 def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
@@ -34,6 +35,7 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "best_rankic",
         "mean_ic",
         "mean_rankic",
+        "test_rankic",
     ]
     write_header = not os.path.isfile(path)
     row = {name: metrics.get(name, math.nan) for name in fieldnames}
@@ -102,7 +104,8 @@ class CustomCallback(BaseCallback):
                 "best_ic": getattr(self.pool, "best_ic_ret", math.nan),
                 "best_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
                 "mean_ic": mean_ic,
-                "mean_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
+                "mean_rankic": math.nan,
+                "test_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
             },
         )
         self.save_checkpoint()
@@ -141,6 +144,15 @@ def main(
     market: str = "csi300",
     pool_capacity: int = 50,
     steps: int = 200_000,
+    backbone: str = "lstm",
+    re_mode: str = "ensemble",
+    reward_mode: str = "re",
+    lambda_ri: float = 0.0,
+    reward_per_step: float = REWARD_PER_STEP,
+    ri_reg_l0: Optional[float] = None,
+    ri_struct_topk: int = 5,
+    run_name: str = "",
+    logdir: str = "",
     provider_uri: str = "",
     ckpt_dir: str = "",
     tb_dir: str = "",
@@ -201,17 +213,26 @@ def main(
         capacity=pool_capacity,
         calculator=calculator_train,
         ic_lower_bound=None,
-        l1_alpha=5e-3
+        l1_alpha=5e-3,
+        reward_mode=reward_mode,
+        re_mode=re_mode,
+        lambda_ri=lambda_ri,
+        ri_reg_l0=ri_reg_l0,
+        ri_struct_topk=ri_struct_topk,
     )
-    env = AlphaEnv(pool=pool, device=device, print_expr=True)
+    env = AlphaEnv(pool=pool, device=device, print_expr=True, reward_per_step=reward_per_step)
 
-    name_prefix = f"new_{market}_{pool_capacity}_{seed}"
+    if run_name:
+        name_prefix = run_name
+    else:
+        name_prefix = f"new_{market}_{pool_capacity}_{seed}_{backbone}_{reward_mode}"
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     ckpt_run_dir = os.path.join(resolved_ckpt_dir, f"{name_prefix}_{timestamp}")
     tb_run_dir = os.path.join(resolved_tb_dir, f"{name_prefix}_{timestamp}")
     os.makedirs(ckpt_run_dir, exist_ok=True)
     os.makedirs(tb_run_dir, exist_ok=True)
-    run_root_dir = os.path.join(os.path.dirname(resolved_ckpt_dir), f"{name_prefix}_{timestamp}")
+    resolved_logdir = logdir or os.path.dirname(resolved_ckpt_dir)
+    run_root_dir = os.path.join(resolved_logdir, f"{name_prefix}_{timestamp}")
     os.makedirs(run_root_dir, exist_ok=True)
     meta_path = os.path.join(run_root_dir, "run_meta.json")
     try:
@@ -223,6 +244,13 @@ def main(
                     "seed": seed,
                     "pool_capacity": pool_capacity,
                     "steps": steps,
+                    "backbone": backbone,
+                    "re_mode": re_mode,
+                    "reward_mode": reward_mode,
+                    "lambda_ri": lambda_ri,
+                    "reward_per_step": reward_per_step,
+                    "ri_reg_l0": ri_reg_l0,
+                    "ri_struct_topk": ri_struct_topk,
                     "timestamp": timestamp,
                     "ckpt_run_dir": ckpt_run_dir,
                     "tb_run_dir": tb_run_dir,
@@ -248,17 +276,31 @@ def main(
         verbose=1,
     )
 
+    if backbone == "transformer":
+        features_extractor_class = TransformerSharedNet
+        features_extractor_kwargs = dict(
+            n_encoder_layers=2,
+            d_model=128,
+            n_head=4,
+            d_ffn=256,
+            dropout=0.1,
+            device=device,
+        )
+    else:
+        features_extractor_class = LSTMSharedNet
+        features_extractor_kwargs = dict(
+            n_layers=2,
+            d_model=128,
+            dropout=0.1,
+            device=device,
+        )
+
     model = MaskablePPO(
         'MlpPolicy',
         env,
         policy_kwargs=dict(
-            features_extractor_class=LSTMSharedNet,
-            features_extractor_kwargs=dict(
-                n_layers=2,
-                d_model=128,
-                dropout=0.1,
-                device=device,
-            ),
+            features_extractor_class=features_extractor_class,
+            features_extractor_kwargs=features_extractor_kwargs,
         ),
         gamma=1.,
         ent_coef=0.01,
@@ -274,27 +316,81 @@ def main(
     )
 
 
-def fire_helper(
-    seed: Union[int, Tuple[int]],
-    code: str,
-    pool: int,
-    step: int = None
-):
-    if isinstance(seed, int):
-        seed = (seed, )
+def _parse_seed_list(seed_value: Union[str, int]) -> List[int]:
+    if isinstance(seed_value, int):
+        return [seed_value]
+    seed_str = str(seed_value)
+    if "," in seed_str:
+        return [int(x.strip()) for x in seed_str.split(",") if x.strip()]
+    return [int(seed_str)]
+
+
+def _resolve_steps(pool: int, step: Optional[int]) -> int:
     default_steps = {
         10: 250_000,
         20: 300_000,
         50: 350_000,
         100: 400_000
     }
-    for _seed in seed:
-        main(_seed,
-             code,
-             pool,
-             default_steps[int(pool)] if step is None else int(step)
-             )
+    if step is not None:
+        return int(step)
+    return int(default_steps.get(int(pool), 200_000))
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("seed_pos", nargs="?", type=str)
+    parser.add_argument("code_pos", nargs="?", type=str)
+    parser.add_argument("pool_pos", nargs="?", type=int)
+    parser.add_argument("--seed", type=str, default=None)
+    parser.add_argument("--code", type=str, default=None)
+    parser.add_argument("--pool", type=int, default=None)
+    parser.add_argument("--step", "--steps", dest="step", type=int, default=None)
+    parser.add_argument("--backbone", type=str, default="lstm", choices=["lstm", "transformer"])
+    parser.add_argument("--re_mode", type=str, default="ensemble", choices=["ensemble", "delta_best"])
+    parser.add_argument("--reward_mode", type=str, default="re",
+                        choices=["re", "re+func", "re+struct", "re+reg", "re+func+struct", "re+all"])
+    parser.add_argument("--lambda_ri", type=float, default=0.0)
+    parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
+    parser.add_argument("--ri_reg_l0", type=float, default=None)
+    parser.add_argument("--ri_struct_topk", type=int, default=5)
+    parser.add_argument("--run_name", type=str, default="")
+    parser.add_argument("--logdir", type=str, default="")
+    parser.add_argument("--provider_uri", type=str, default="")
+    parser.add_argument("--ckpt_dir", type=str, default="")
+    parser.add_argument("--tb_dir", type=str, default="")
+    parser.add_argument("--device", type=str, default="auto")
+    return parser
 
 
 if __name__ == '__main__':
-    fire.Fire(fire_helper)
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    seed_arg = args.seed if args.seed is not None else args.seed_pos
+    code_arg = args.code if args.code is not None else args.code_pos
+    pool_arg = args.pool if args.pool is not None else args.pool_pos
+    if seed_arg is None or code_arg is None or pool_arg is None:
+        parser.error("seed, code, pool are required (positional or via --seed/--code/--pool).")
+
+    steps = _resolve_steps(pool_arg, args.step)
+    for seed in _parse_seed_list(seed_arg):
+        main(
+            seed=seed,
+            market=code_arg,
+            pool_capacity=int(pool_arg),
+            steps=steps,
+            backbone=args.backbone,
+            re_mode=args.re_mode,
+            reward_mode=args.reward_mode,
+            lambda_ri=args.lambda_ri,
+            reward_per_step=args.reward_per_step,
+            ri_reg_l0=args.ri_reg_l0,
+            ri_struct_topk=args.ri_struct_topk,
+            run_name=args.run_name,
+            logdir=args.logdir,
+            provider_uri=args.provider_uri,
+            ckpt_dir=args.ckpt_dir,
+            tb_dir=args.tb_dir,
+            device=args.device,
+        )

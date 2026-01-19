@@ -53,6 +53,8 @@ if __name__ == '__main__':
             expr = eval(key)
             try:
                 ret = self.pool.try_new_expr(expr)
+                if isinstance(ret, tuple):
+                    ret = ret[0]
             except OutOfDataRangeError:
                 ret = -1.
             finally:

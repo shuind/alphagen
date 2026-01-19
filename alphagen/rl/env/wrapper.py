@@ -49,8 +49,9 @@ class AlphaEnvWrapper(gym.Wrapper):
     observation_space: gym.spaces.Box
     counter: int
 
-    def __init__(self, env: AlphaEnvCore):
+    def __init__(self, env: AlphaEnvCore, reward_per_step: float = REWARD_PER_STEP):
         super().__init__(env)
+        self._reward_per_step = reward_per_step
         self.action_space = gym.spaces.Discrete(SIZE_ACTION)
         self.observation_space = gym.spaces.Box(low=0, high=SIZE_ALL - 1, shape=(MAX_EXPR_LENGTH, ), dtype=np.uint8)
 
@@ -65,13 +66,18 @@ class AlphaEnvWrapper(gym.Wrapper):
         if not done:
             self.state[self.counter] = action
             self.counter += 1
-        return self.state, self.reward(reward), done, truncated, info
+        total_reward = self.reward(reward)
+        info = dict(info) if info is not None else {}
+        info.setdefault("reward_raw", float(reward))
+        info["reward_step"] = float(self._reward_per_step)
+        info["reward_total_env"] = float(total_reward)
+        return self.state, total_reward, done, truncated, info
 
     def action(self, action: int) -> Token:
         return action2token(action)
 
     def reward(self, reward: float) -> float:
-        return reward + REWARD_PER_STEP
+        return reward + self._reward_per_step
 
     def action_masks(self) -> np.ndarray:
         res = np.zeros(SIZE_ACTION, dtype=bool)
@@ -93,5 +99,5 @@ class AlphaEnvWrapper(gym.Wrapper):
         return res
 
 
-def AlphaEnv(pool: AlphaPoolBase, **kwargs):
-    return AlphaEnvWrapper(AlphaEnvCore(pool=pool, **kwargs))
+def AlphaEnv(pool: AlphaPoolBase, reward_per_step: float = REWARD_PER_STEP, **kwargs):
+    return AlphaEnvWrapper(AlphaEnvCore(pool=pool, **kwargs), reward_per_step=reward_per_step)

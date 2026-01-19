@@ -45,33 +45,43 @@ class AlphaEnvCore(gym.Env):
     def step(self, action: Token) -> Tuple[List[Token], float, bool, bool, dict]:
         if (isinstance(action, SequenceIndicatorToken) and
                 action.indicator == SequenceIndicatorType.SEP):
-            reward = self._evaluate()
+            reward, info = self._evaluate()
             done = True
         elif len(self._tokens) < MAX_EXPR_LENGTH:
             self._tokens.append(action)
             self._builder.add_token(action)
             done = False
             reward = 0.0
+            info = {}
         else:
             done = True
-            reward = self._evaluate() if self._builder.is_valid() else -1.
+            if self._builder.is_valid():
+                reward, info = self._evaluate()
+            else:
+                reward = -1.0
+                info = {"invalid_expr": True}
 
         if math.isnan(reward):
             reward = 0.
 
         truncated = False  # Fk gymnasium
-        return self._tokens, reward, done, truncated, self._valid_action_types()
+        return self._tokens, reward, done, truncated, info
 
     def _evaluate(self):
         expr: Expression = self._builder.get_tree()
         if self._print_expr:
             print(expr)
         try:
-            ret = self.pool.try_new_expr(expr)
+            token_seq = [
+                str(token)
+                for token in self._tokens
+                if not isinstance(token, SequenceIndicatorToken)
+            ]
+            ret, info = self.pool.try_new_expr(expr, token_seq=token_seq)
             self.eval_cnt += 1
-            return ret
+            return ret, info
         except OutOfDataRangeError:
-            return 0.
+            return 0.0, {"out_of_data": True}
 
     def _valid_action_types(self) -> dict:
         valid_op_unary = self._builder.validate_op(UnaryOperator)
