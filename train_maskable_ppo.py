@@ -225,7 +225,10 @@ def main(
     if run_name:
         name_prefix = run_name
     else:
-        name_prefix = f"new_{market}_{pool_capacity}_{seed}_{backbone}_{reward_mode}"
+        name_prefix = (
+            f"mkt-{market}__bb-{backbone}__rw-{reward_mode}"
+            f"__seed-{seed}__pool-{pool_capacity}__re-{re_mode}"
+        )
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     ckpt_run_dir = os.path.join(resolved_ckpt_dir, f"{name_prefix}_{timestamp}")
     tb_run_dir = os.path.join(resolved_tb_dir, f"{name_prefix}_{timestamp}")
@@ -251,6 +254,10 @@ def main(
                     "reward_per_step": reward_per_step,
                     "ri_reg_l0": ri_reg_l0,
                     "ri_struct_topk": ri_struct_topk,
+                    "run_label": (
+                        f"{market} | {backbone} | {reward_mode} | "
+                        f"seed={seed} | pool={pool_capacity}"
+                    ),
                     "timestamp": timestamp,
                     "ckpt_run_dir": ckpt_run_dir,
                     "tb_run_dir": tb_run_dir,

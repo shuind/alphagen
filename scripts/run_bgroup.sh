@@ -18,7 +18,7 @@ timestamp="$(date +%Y%m%d%H%M%S)"
 
 for backbone in "${BACKBONES[@]}"; do
   for reward_mode in "${REWARD_MODES[@]}"; do
-    run_name="bgroup_${backbone}_${reward_mode}_${SEED}_${POOL}_${CODE}_${timestamp}"
+    run_name="grp-${timestamp}__mkt-${CODE}__bb-${backbone}__rw-${reward_mode}__seed-${SEED}__pool-${POOL}"
     python train_maskable_ppo.py \
       --seed "${SEED}" \
       --pool "${POOL}" \
