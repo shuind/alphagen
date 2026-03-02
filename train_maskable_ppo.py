@@ -225,10 +225,8 @@ def main(
     if run_name:
         name_prefix = run_name
     else:
-        name_prefix = (
-            f"mkt-{market}__bb-{backbone}__rw-{reward_mode}"
-            f"__seed-{seed}__pool-{pool_capacity}__re-{re_mode}"
-        )
+        step_tag = _format_step_tag(int(steps))
+        name_prefix = f"b_seed{seed}_{backbone}_{reward_mode}_{step_tag}"
     timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     ckpt_run_dir = os.path.join(resolved_ckpt_dir, f"{name_prefix}_{timestamp}")
     tb_run_dir = os.path.join(resolved_tb_dir, f"{name_prefix}_{timestamp}")
@@ -321,6 +319,14 @@ def main(
         callback=checkpoint_callback,
         tb_log_name=f'{name_prefix}_{timestamp}',
     )
+
+
+
+
+def _format_step_tag(steps: int) -> str:
+    if steps % 1000 == 0:
+        return f"{steps // 1000}k"
+    return str(steps)
 
 
 def _parse_seed_list(seed_value: Union[str, int]) -> List[int]:

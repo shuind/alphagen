@@ -15,10 +15,15 @@ BACKBONES=("lstm" "transformer")
 REWARD_MODES=("re" "re+func" "re+struct" "re+reg" "re+func+struct" "re+all")
 
 timestamp="$(date +%Y%m%d%H%M%S)"
+if (( STEPS % 1000 == 0 )); then
+  STEP_TAG="$((STEPS / 1000))k"
+else
+  STEP_TAG="${STEPS}"
+fi
 
 for backbone in "${BACKBONES[@]}"; do
   for reward_mode in "${REWARD_MODES[@]}"; do
-    run_name="grp-${timestamp}__mkt-${CODE}__bb-${backbone}__rw-${reward_mode}__seed-${SEED}__pool-${POOL}"
+    run_name="b_seed${SEED}_${backbone}_${reward_mode}_${STEP_TAG}_${timestamp}"
     python train_maskable_ppo.py \
       --seed "${SEED}" \
       --pool "${POOL}" \
