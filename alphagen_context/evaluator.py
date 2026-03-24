@@ -108,7 +108,7 @@ class ContextEvaluator(nn.Module):
         top_frac: float = 0.2,
         cluster_bank: Optional[StructureClusterBank] = None,
         ri_func_weight: float = 1.0,
-        ri_struct_weight: float = 1.0,
+        ri_struct_weight: float = 0.0,
         ri_reg_weight: float = 1.0,
         reward_lambda: float = 0.3,
         reward_schedule_decay: float = 0.0,

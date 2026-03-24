@@ -57,6 +57,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha_source_file", type=str, default="")
     parser.add_argument("--reward_lambda", type=float, default=0.3)
     parser.add_argument("--reward_schedule_decay", type=float, default=0.0)
+    parser.add_argument("--ri_func_weight", type=float, default=1.0)
+    parser.add_argument("--ri_struct_weight", type=float, default=0.0)
+    parser.add_argument("--ri_reg_weight", type=float, default=1.0)
     parser.add_argument("--eta", type=float, default=0.0)
     parser.add_argument("--xi", type=float, default=0.0)
     parser.add_argument("--device", type=str, default="auto")
@@ -190,6 +193,9 @@ def main() -> None:
         eta=args.eta,
         xi=args.xi,
         cluster_bank=StructureClusterBank(),
+        ri_func_weight=args.ri_func_weight,
+        ri_struct_weight=args.ri_struct_weight,
+        ri_reg_weight=args.ri_reg_weight,
         reward_lambda=args.reward_lambda,
         reward_schedule_decay=args.reward_schedule_decay,
     )
@@ -232,6 +238,9 @@ def main() -> None:
                 "reward_schedule": {
                     "reward_lambda": args.reward_lambda,
                     "reward_schedule_decay": args.reward_schedule_decay,
+                    "ri_func_weight": args.ri_func_weight,
+                    "ri_struct_weight": args.ri_struct_weight,
+                    "ri_reg_weight": args.ri_reg_weight,
                 },
                 "pretrain_bundle": args.pretrain_bundle,
                 "init_pool_size": args.init_pool_size,

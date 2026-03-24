@@ -237,7 +237,7 @@ class ContextAlphaPool(AlphaPoolBase):
             "reward_total": float(reward_total),
             "reward_pool": float(reward_total),
             "metric_before": float(old_metric),
-            "metric_after": float(self.best_metric if self.size > 0 else 0.0),
+            "metric_after": float(new_eval["metric"]),
             "marginal_rankic_gain": float(marginal_rankic_gain),
             "combiner_weight_sparsity": float(self.last_reward_info.get("combiner_weight_sparsity", 0.0)),
             "reward_lambda": float(reward_lambda),
