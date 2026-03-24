@@ -478,6 +478,19 @@ class AlphaPool(AlphaPoolBase):
         risky_penalty = self._risky_operator_count(expr) / max(1.0, length)
         return -float(length_penalty + depth_penalty + risky_penalty)
 
+    def _iter_expr_nodes(self, expr: Expression):
+        yield expr
+        if isinstance(expr, UnaryOperator):
+            yield from self._iter_expr_nodes(expr._operand)
+        elif isinstance(expr, BinaryOperator):
+            yield from self._iter_expr_nodes(expr._lhs)
+            yield from self._iter_expr_nodes(expr._rhs)
+        elif isinstance(expr, RollingOperator):
+            yield from self._iter_expr_nodes(expr._operand)
+        elif isinstance(expr, PairRollingOperator):
+            yield from self._iter_expr_nodes(expr._lhs)
+            yield from self._iter_expr_nodes(expr._rhs)
+
     def _assign_structure_cluster(self, new_bigrams: Set[Tuple[str, str]]) -> int:
         if not self._structure_clusters:
             self._structure_clusters.append(
