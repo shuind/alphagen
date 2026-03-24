@@ -9,7 +9,18 @@ from torch import Tensor
 from alphagen.data.calculator import AlphaCalculator
 from alphagen.config import MAX_EXPR_LENGTH
 
-from alphagen.data.expression import Expression
+from alphagen.data.expression import (
+    BinaryOperator,
+    Corr,
+    Cov,
+    Div,
+    Expression,
+    Greater,
+    Less,
+    PairRollingOperator,
+    RollingOperator,
+    UnaryOperator,
+)
 from alphagen.utils.correlation import batch_pearsonr, batch_spearmanr
 from alphagen.utils.pytorch_utils import masked_mean_std
 from alphagen_qlib.stock_data import StockData
