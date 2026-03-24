@@ -1,6 +1,6 @@
 from itertools import count
 import math
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Tuple, Set
 from abc import ABCMeta, abstractmethod
 
 import numpy as np
@@ -46,6 +46,14 @@ class AlphaPool(AlphaPoolBase):
         reward_mode: str = "re",
         re_mode: str = "ensemble",
         lambda_ri: float = 0.0,
+        ri_func_weight: float = 1.0,
+        ri_struct_weight: float = 1.0,
+        ri_reg_weight: float = 1.0,
+        ri_schedule_decay: float = 0.0,
+        ri_struct_value_bonus: float = 0.1,
+        ri_struct_underexplore_power: float = 1.0,
+        ri_func_metric: str = "rankic",
+        ri_admission_gate: bool = False,
         ri_topk: int = 5,
         ri_struct_topk: int = 5,
         ri_reg_l0: Optional[float] = None,
@@ -67,11 +75,21 @@ class AlphaPool(AlphaPoolBase):
         self.reward_mode = reward_mode
         self.re_mode = re_mode
         self.lambda_ri = lambda_ri
+        self.ri_func_weight = float(ri_func_weight)
+        self.ri_struct_weight = float(ri_struct_weight)
+        self.ri_reg_weight = float(ri_reg_weight)
+        self.ri_schedule_decay = float(ri_schedule_decay)
+        self.ri_struct_value_bonus = float(ri_struct_value_bonus)
+        self.ri_struct_underexplore_power = float(ri_struct_underexplore_power)
+        self.ri_func_metric = str(ri_func_metric)
+        self.ri_admission_gate = bool(ri_admission_gate)
         self.ri_topk = ri_topk
         self.ri_struct_topk = ri_struct_topk
         self.ri_reg_l0 = float(ri_reg_l0) if ri_reg_l0 is not None else float(int(0.7 * MAX_EXPR_LENGTH))
 
         self.eval_cnt = 0
+        self.last_reward_info: Dict[str, Any] = {}
+        self._structure_clusters: List[Dict[str, Any]] = []
 
     @property
     def state(self) -> dict:
@@ -85,9 +103,29 @@ class AlphaPool(AlphaPoolBase):
     def to_dict(self) -> dict:
         return {
             "exprs": [str(expr) for expr in self.exprs[:self.size]],
-            "weights": list(self.weights[:self.size])
+            "weights": list(self.weights[:self.size]),
+            "last_reward_info": self.last_reward_info,
+            "cluster_bank_summary": self.cluster_bank_summary,
         }
 
+    @property
+    def cluster_bank_summary(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "cluster_id": int(cluster["cluster_id"]),
+                "cluster_count": int(cluster["count"]),
+                "cluster_mean_re": float(cluster["mean_re"]),
+                "cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+                "last_seen_eval": int(cluster["last_seen_eval"]),
+            }
+            for cluster in self._structure_clusters
+        ]
+
+    def _expr_key(self, expr: Expression) -> str:
+        return str(expr)
+
+    def _mutual_key(self, lhs_key: str, rhs_key: str) -> Tuple[str, str]:
+        return (lhs_key, rhs_key) if lhs_key <= rhs_key else (rhs_key, lhs_key)
     def try_new_expr(self, expr: Expression, token_seq: Optional[List[str]] = None) -> Tuple[float, Dict]:
         ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=0.99)
         if ic_ret is None or ic_mut is None or np.isnan(ic_ret) or np.isnan(ic_mut).any():
@@ -104,9 +142,12 @@ class AlphaPool(AlphaPoolBase):
             }
             return 0.0, info
 
-        ri_func = self._calc_ri_func(ic_mut) if self._use_ri_func else 0.0
-        ri_struct = self._calc_ri_struct(token_seq) if self._use_ri_struct else 0.0
-        ri_reg = self._calc_ri_reg(token_seq) if self._use_ri_reg else 0.0
+        ri_func = self._calc_ri_func_v2(expr) if self._use_v2 and self._use_ri_func else (
+            self._calc_ri_func(ic_mut) if self._use_ri_func else 0.0
+        )
+        ri_reg = self._calc_ri_reg_v2(expr, token_seq) if self._use_v2 and self._use_ri_reg else (
+            self._calc_ri_reg(token_seq) if self._use_ri_reg else 0.0
+        )
 
         prev_best_ic_ret = self.best_ic_ret
         self._add_factor(expr, ic_ret, ic_mut, token_seq)
@@ -123,7 +164,14 @@ class AlphaPool(AlphaPoolBase):
             self.best_ic_ret = new_ic_ret
         self.eval_cnt += 1
         re = self._compose_re(new_ic_ret, increment)
-        reward_total = self._compose_reward(re, ri_func, ri_struct, ri_reg)
+        cluster_info: Dict[str, Any] = {}
+        ri_struct = 0.0
+        if self._use_ri_struct:
+            if self._use_v2:
+                ri_struct, cluster_info = self._calc_ri_struct_v2(token_seq, re)
+            else:
+                ri_struct = self._calc_ri_struct(token_seq)
+        reward_total, reward_lambda_t = self._compose_reward(re, ri_func, ri_struct, ri_reg)
         info = {
             "re": float(re),
             "ri_func": float(ri_func),
@@ -135,7 +183,13 @@ class AlphaPool(AlphaPoolBase):
             "increment": float(increment),
             "ic_single": float(ic_ret),
             "re_mode": self.re_mode,
+            "reward_lambda_t": float(reward_lambda_t),
+            "admission_gate_enabled": bool(self.ri_admission_gate and self._use_v2),
+            "admission_gate_passed": bool((not self.ri_admission_gate) or (re > 0)),
         }
+        if cluster_info:
+            info.update(cluster_info)
+        self.last_reward_info = info
         return reward_total, info
 
     def force_load_exprs(self, exprs: List[Expression]) -> None:
@@ -275,6 +329,10 @@ class AlphaPool(AlphaPoolBase):
     def _use_ri_reg(self) -> bool:
         return "reg" in self.reward_mode or "all" in self.reward_mode
 
+    @property
+    def _use_v2(self) -> bool:
+        return self.reward_mode.startswith("re_v2")
+
     def _compose_re(self, ic_ensemble: float, increment: float) -> float:
         if self.re_mode == "delta_best":
             return increment
@@ -286,17 +344,22 @@ class AlphaPool(AlphaPoolBase):
         ri_func: float,
         ri_struct: float,
         ri_reg: float
-    ) -> float:
+    ) -> Tuple[float, float]:
+        reward_lambda = self.lambda_ri
+        if self._use_v2:
+            reward_lambda = self.lambda_ri / (1.0 + self.ri_schedule_decay * max(self.eval_cnt, 0))
         if self.reward_mode == "re":
-            return re
+            return re, reward_lambda
+        if self.reward_mode == "re_v2":
+            return re, reward_lambda
         ri_sum = 0.0
         if self._use_ri_func:
-            ri_sum += ri_func
+            ri_sum += self.ri_func_weight * ri_func
         if self._use_ri_struct:
-            ri_sum += ri_struct
+            ri_sum += self.ri_struct_weight * ri_struct
         if self._use_ri_reg:
-            ri_sum += ri_reg
-        return re + self.lambda_ri * ri_sum
+            ri_sum += self.ri_reg_weight * ri_reg
+        return re + reward_lambda * ri_sum, reward_lambda
 
     def _calc_ri_func(self, ic_mut: List[float]) -> float:
         if not ic_mut:
@@ -307,6 +370,25 @@ class AlphaPool(AlphaPoolBase):
         k = max(1, min(self.ri_topk, len(valid)))
         topk = sorted(valid)[-k:]
         return -float(np.mean(topk))
+
+    def _calc_ri_func_v2(self, expr: Expression) -> float:
+        candidate_value = self.calculator._calc_alpha(expr)
+        target_value = getattr(self.calculator, "target_value", None)
+        if target_value is None:
+            return 0.0
+        if self.size <= 0:
+            metric = batch_spearmanr(candidate_value, target_value) if self.ri_func_metric == "rankic" else batch_pearsonr(candidate_value, target_value)
+            return float(metric.mean().item())
+
+        pool_values = torch.stack([self.calculator._calc_alpha(self.exprs[i]) for i in range(self.size)], dim=0)
+        x = pool_values.permute(1, 2, 0).reshape(-1, self.size).float()
+        y = candidate_value.reshape(-1).float()
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+        beta = torch.linalg.lstsq(x, y).solution
+        resid = (y - x @ beta).view_as(candidate_value)
+        metric = batch_spearmanr(resid, target_value) if self.ri_func_metric == "rankic" else batch_pearsonr(resid, target_value)
+        return float(metric.mean().item())
 
     def _calc_ri_struct(self, token_seq: Optional[List[str]]) -> float:
         if token_seq is None or len(token_seq) < 2 or self.size == 0:
@@ -332,6 +414,38 @@ class AlphaPool(AlphaPoolBase):
             max_jaccard = max(max_jaccard, inter / union)
         return 1.0 - max_jaccard
 
+    def _calc_ri_struct_v2(self, token_seq: Optional[List[str]], re_value: float) -> Tuple[float, Dict[str, Any]]:
+        if token_seq is None or len(token_seq) < 2:
+            return 0.0, {
+                "cluster_id": -1,
+                "cluster_count": 0,
+                "cluster_mean_re": 0.0,
+                "cluster_positive_re_rate": 0.0,
+            }
+        new_bigrams = self._token_bigrams(token_seq)
+        if not new_bigrams:
+            return 0.0, {
+                "cluster_id": -1,
+                "cluster_count": 0,
+                "cluster_mean_re": 0.0,
+                "cluster_positive_re_rate": 0.0,
+            }
+        cluster_idx = self._assign_structure_cluster(new_bigrams)
+        cluster = self._structure_clusters[cluster_idx]
+        value_score = max(float(cluster["mean_re"]), 0.0)
+        count = max(1, int(cluster["count"]))
+        underexplore_score = 1.0 / (count ** max(self.ri_struct_underexplore_power, 1e-6))
+        new_cluster_bonus = 0.1 * self.ri_struct_value_bonus if int(cluster["count"]) == 0 else 0.0
+        bonus = self.ri_struct_value_bonus * value_score * underexplore_score + new_cluster_bonus
+        self._update_structure_cluster(cluster_idx, re_value)
+        cluster = self._structure_clusters[cluster_idx]
+        return float(bonus), {
+            "cluster_id": int(cluster_idx),
+            "cluster_count": int(cluster["count"]),
+            "cluster_mean_re": float(cluster["mean_re"]),
+            "cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+        }
+
     def _calc_ri_reg(self, token_seq: Optional[List[str]]) -> float:
         if token_seq is None:
             return 0.0
@@ -340,6 +454,90 @@ class AlphaPool(AlphaPoolBase):
             return 0.0
         l0 = max(1.0, float(self.ri_reg_l0))
         return -max(0.0, (length - l0) / l0)
+
+    def _calc_ri_reg_v2(self, expr: Expression, token_seq: Optional[List[str]]) -> float:
+        if token_seq is None:
+            return 0.0
+        length = len(token_seq)
+        if length <= 0:
+            return 0.0
+        l0 = max(1.0, float(self.ri_reg_l0))
+        length_penalty = max(0.0, (length - l0) / l0)
+        depth_penalty = max(0.0, (self._expr_depth(expr) - 4) / 4.0)
+        risky_penalty = self._risky_operator_count(expr) / max(1.0, length)
+        return -float(length_penalty + depth_penalty + risky_penalty)
+
+    def _assign_structure_cluster(self, new_bigrams: Set[Tuple[str, str]]) -> int:
+        if not self._structure_clusters:
+            self._structure_clusters.append(
+                {
+                    "cluster_id": 0,
+                    "prototype": set(new_bigrams),
+                    "count": 0,
+                    "mean_re": 0.0,
+                    "positive_re_rate": 0.0,
+                    "positive_count": 0,
+                    "last_seen_eval": -1,
+                }
+            )
+            return 0
+        best_idx = -1
+        best_sim = -1.0
+        for idx, cluster in enumerate(self._structure_clusters):
+            old_bigrams = cluster["prototype"]
+            inter = len(new_bigrams & old_bigrams)
+            union = len(new_bigrams | old_bigrams)
+            sim = 0.0 if union == 0 else inter / union
+            if sim > best_sim:
+                best_sim = sim
+                best_idx = idx
+        threshold = 0.5
+        if best_idx < 0 or best_sim < threshold:
+            new_idx = len(self._structure_clusters)
+            self._structure_clusters.append(
+                {
+                    "cluster_id": new_idx,
+                    "prototype": set(new_bigrams),
+                    "count": 0,
+                    "mean_re": 0.0,
+                    "positive_re_rate": 0.0,
+                    "positive_count": 0,
+                    "last_seen_eval": -1,
+                }
+            )
+            return new_idx
+        return best_idx
+
+    def _update_structure_cluster(self, cluster_idx: int, re_value: float) -> None:
+        cluster = self._structure_clusters[cluster_idx]
+        count = int(cluster["count"])
+        positive_count = int(cluster["positive_count"])
+        new_count = count + 1
+        cluster["mean_re"] = (float(cluster["mean_re"]) * count + float(re_value)) / new_count
+        cluster["positive_count"] = positive_count + int(re_value > 0)
+        cluster["positive_re_rate"] = float(cluster["positive_count"]) / new_count
+        cluster["count"] = new_count
+        cluster["last_seen_eval"] = int(self.eval_cnt)
+
+    def _expr_depth(self, expr: Expression) -> int:
+        if isinstance(expr, UnaryOperator):
+            return 1 + self._expr_depth(expr._operand)
+        if isinstance(expr, BinaryOperator):
+            return 1 + max(self._expr_depth(expr._lhs), self._expr_depth(expr._rhs))
+        if isinstance(expr, RollingOperator):
+            return 1 + self._expr_depth(expr._operand)
+        if isinstance(expr, PairRollingOperator):
+            return 1 + max(self._expr_depth(expr._lhs), self._expr_depth(expr._rhs))
+        return 1
+
+    def _risky_operator_count(self, expr: Expression) -> int:
+        count = 0
+        for node in self._iter_expr_nodes(expr):
+            if isinstance(node, (Div, Corr, Cov, Less, Greater)):
+                count += 1
+            elif node.__class__.__name__ == "Log":
+                count += 1
+        return count
 
     @staticmethod
     def _token_bigrams(token_seq: List[str]) -> Set[Tuple[str, str]]:

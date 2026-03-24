@@ -36,6 +36,16 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "mean_ic",
         "mean_rankic",
         "test_rankic",
+        "reward_total",
+        "RE",
+        "RI_func",
+        "RI_struct",
+        "RI_reg",
+        "reward_lambda_t",
+        "cluster_id",
+        "cluster_count",
+        "cluster_mean_re",
+        "cluster_positive_re_rate",
     ]
     write_header = not os.path.isfile(path)
     row = {name: metrics.get(name, math.nan) for name in fieldnames}
@@ -91,6 +101,7 @@ class CustomCallback(BaseCallback):
         ic_test, rank_ic_test = self.pool.test_ensemble(self.test_calculator)
         self.logger.record('test/ic', ic_test)
         self.logger.record('test/rank_ic', rank_ic_test)
+        rank_ic_test_value = float(rank_ic_test) if rank_ic_test is not None else math.nan
         pool_size = getattr(self.pool, "size", math.nan)
         if isinstance(pool_size, (int, np.integer)) and pool_size > 0 and hasattr(self.pool, "single_ics"):
             mean_ic = float(np.nanmean(self.pool.single_ics[:pool_size]))
@@ -102,10 +113,20 @@ class CustomCallback(BaseCallback):
             {
                 "pool_size": pool_size,
                 "best_ic": getattr(self.pool, "best_ic_ret", math.nan),
-                "best_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
+                "best_rankic": rank_ic_test_value,
                 "mean_ic": mean_ic,
                 "mean_rankic": math.nan,
-                "test_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
+                "test_rankic": rank_ic_test_value,
+                "reward_total": getattr(self.pool, "last_reward_info", {}).get("reward_total", math.nan),
+                "RE": getattr(self.pool, "last_reward_info", {}).get("re", math.nan),
+                "RI_func": getattr(self.pool, "last_reward_info", {}).get("ri_func", math.nan),
+                "RI_struct": getattr(self.pool, "last_reward_info", {}).get("ri_struct", math.nan),
+                "RI_reg": getattr(self.pool, "last_reward_info", {}).get("ri_reg", math.nan),
+                "reward_lambda_t": getattr(self.pool, "last_reward_info", {}).get("reward_lambda_t", math.nan),
+                "cluster_id": getattr(self.pool, "last_reward_info", {}).get("cluster_id", math.nan),
+                "cluster_count": getattr(self.pool, "last_reward_info", {}).get("cluster_count", math.nan),
+                "cluster_mean_re": getattr(self.pool, "last_reward_info", {}).get("cluster_mean_re", math.nan),
+                "cluster_positive_re_rate": getattr(self.pool, "last_reward_info", {}).get("cluster_positive_re_rate", math.nan),
             },
         )
         self.save_checkpoint()
@@ -148,6 +169,14 @@ def main(
     re_mode: str = "ensemble",
     reward_mode: str = "re",
     lambda_ri: float = 0.0,
+    ri_func_weight: float = 1.0,
+    ri_struct_weight: float = 1.0,
+    ri_reg_weight: float = 1.0,
+    ri_schedule_decay: float = 0.0,
+    ri_struct_value_bonus: float = 0.1,
+    ri_struct_underexplore_power: float = 1.0,
+    ri_func_metric: str = "rankic",
+    ri_admission_gate: bool = False,
     reward_per_step: float = REWARD_PER_STEP,
     ri_reg_l0: Optional[float] = None,
     ri_struct_topk: int = 5,
@@ -217,6 +246,14 @@ def main(
         reward_mode=reward_mode,
         re_mode=re_mode,
         lambda_ri=lambda_ri,
+        ri_func_weight=ri_func_weight,
+        ri_struct_weight=ri_struct_weight,
+        ri_reg_weight=ri_reg_weight,
+        ri_schedule_decay=ri_schedule_decay,
+        ri_struct_value_bonus=ri_struct_value_bonus,
+        ri_struct_underexplore_power=ri_struct_underexplore_power,
+        ri_func_metric=ri_func_metric,
+        ri_admission_gate=ri_admission_gate,
         ri_reg_l0=ri_reg_l0,
         ri_struct_topk=ri_struct_topk,
     )
@@ -249,6 +286,14 @@ def main(
                     "re_mode": re_mode,
                     "reward_mode": reward_mode,
                     "lambda_ri": lambda_ri,
+                    "ri_func_weight": ri_func_weight,
+                    "ri_struct_weight": ri_struct_weight,
+                    "ri_reg_weight": ri_reg_weight,
+                    "ri_schedule_decay": ri_schedule_decay,
+                    "ri_struct_value_bonus": ri_struct_value_bonus,
+                    "ri_struct_underexplore_power": ri_struct_underexplore_power,
+                    "ri_func_metric": ri_func_metric,
+                    "ri_admission_gate": ri_admission_gate,
                     "reward_per_step": reward_per_step,
                     "ri_reg_l0": ri_reg_l0,
                     "ri_struct_topk": ri_struct_topk,
@@ -362,8 +407,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backbone", type=str, default="lstm", choices=["lstm", "transformer"])
     parser.add_argument("--re_mode", type=str, default="ensemble", choices=["ensemble", "delta_best"])
     parser.add_argument("--reward_mode", type=str, default="re",
-                        choices=["re", "re+func", "re+struct", "re+reg", "re+func+struct", "re+all"])
+                        choices=["re", "re+func", "re+struct", "re+reg", "re+func+struct", "re+all",
+                                 "re_v2", "re_v2+func", "re_v2+struct", "re_v2+reg", "re_v2+all"])
     parser.add_argument("--lambda_ri", type=float, default=0.0)
+    parser.add_argument("--ri_func_weight", type=float, default=1.0)
+    parser.add_argument("--ri_struct_weight", type=float, default=1.0)
+    parser.add_argument("--ri_reg_weight", type=float, default=1.0)
+    parser.add_argument("--ri_schedule_decay", type=float, default=0.0)
+    parser.add_argument("--ri_struct_value_bonus", type=float, default=0.1)
+    parser.add_argument("--ri_struct_underexplore_power", type=float, default=1.0)
+    parser.add_argument("--ri_func_metric", type=str, default="rankic", choices=["rankic", "ic"])
+    parser.add_argument("--ri_admission_gate", action="store_true")
     parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
     parser.add_argument("--ri_reg_l0", type=float, default=None)
     parser.add_argument("--ri_struct_topk", type=int, default=5)
@@ -397,6 +451,14 @@ if __name__ == '__main__':
             re_mode=args.re_mode,
             reward_mode=args.reward_mode,
             lambda_ri=args.lambda_ri,
+            ri_func_weight=args.ri_func_weight,
+            ri_struct_weight=args.ri_struct_weight,
+            ri_reg_weight=args.ri_reg_weight,
+            ri_schedule_decay=args.ri_schedule_decay,
+            ri_struct_value_bonus=args.ri_struct_value_bonus,
+            ri_struct_underexplore_power=args.ri_struct_underexplore_power,
+            ri_func_metric=args.ri_func_metric,
+            ri_admission_gate=args.ri_admission_gate,
             reward_per_step=args.reward_per_step,
             ri_reg_l0=args.ri_reg_l0,
             ri_struct_topk=args.ri_struct_topk,
