@@ -72,6 +72,7 @@ class CustomCallback(BaseCallback):
             self.timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
         else:
             self.timestamp = timestamp
+        self.best_test_rankic_seen = -math.inf
 
     def _init_callback(self) -> None:
         if self.save_path is not None:
@@ -91,6 +92,9 @@ class CustomCallback(BaseCallback):
         ic_test, rank_ic_test = self.pool.test_ensemble(self.test_calculator)
         self.logger.record('test/ic', ic_test)
         self.logger.record('test/rank_ic', rank_ic_test)
+        rank_ic_test_value = float(rank_ic_test) if rank_ic_test is not None else math.nan
+        if not math.isnan(rank_ic_test_value):
+            self.best_test_rankic_seen = max(self.best_test_rankic_seen, rank_ic_test_value)
         pool_size = getattr(self.pool, "size", math.nan)
         if isinstance(pool_size, (int, np.integer)) and pool_size > 0 and hasattr(self.pool, "single_ics"):
             mean_ic = float(np.nanmean(self.pool.single_ics[:pool_size]))
@@ -102,10 +106,14 @@ class CustomCallback(BaseCallback):
             {
                 "pool_size": pool_size,
                 "best_ic": getattr(self.pool, "best_ic_ret", math.nan),
-                "best_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
+                "best_rankic": (
+                    self.best_test_rankic_seen
+                    if self.best_test_rankic_seen > -math.inf
+                    else math.nan
+                ),
                 "mean_ic": mean_ic,
                 "mean_rankic": math.nan,
-                "test_rankic": float(rank_ic_test) if rank_ic_test is not None else math.nan,
+                "test_rankic": rank_ic_test_value,
             },
         )
         self.save_checkpoint()

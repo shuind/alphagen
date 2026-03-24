@@ -1,0 +1,169 @@
+{
+  "meta": {
+    "source": "manual_curated",
+    "description": "40 DSL-compatible seed alphas for context-aware training",
+    "num_alpha": 40
+  },
+  "alphas": [
+    {
+      "expr_text": "Log(Log($volume))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Div($vwap,$volume)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Div($low,$vwap)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Div(Constant(10.0),$open)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Corr($volume,Sub(Constant(0.01),Div($close,Constant(30.0))),50)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Sub(Sub(Constant(-2.0),Var(Log($vwap),40)),Constant(10.0))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Mul(Add($open,$volume),Log($close))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Add($low,Min(Add(Delta($open,40),Constant(5.0)),50))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Div($open,Log($close))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Sub(Min(Add($open,$volume),40),Add(Constant(-10.0),Log($vwap)))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Div(WMA(Sub(Mul($high,Constant(-2.0)),$vwap),30),Add($open,Constant(5.0)))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Add(Div(Div(Add(Constant(30.0),$vwap),Sub($open,Constant(1.0))),$volume),Constant(-2.0))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Div(Min($close,10),$low)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Mul(Less(Mean(Mul(Div(Log($high),Mul($high,$low)),Sub($low,$vwap)),40),Constant(30.0)),$low)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Mad(Log($high),50)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Sum(Mul(Corr(Div($volume,Constant(-0.5)),$close,20),Constant(5.0)),10)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Div($vwap,Max($close,50))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Ref(Log($vwap),20)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Div(WMA($close,10),$high)",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Add(Constant(2.0),Mad(Log($high),50))",
+      "group": "existing"
+    },
+    {
+      "expr_text": "Sub(Constant(0.0),Delta($close,5))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Delta($close,20)",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($open,Ref($close,1)),Add(Abs(Ref($close,1)),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($close,$open),Add(Abs($open),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($high,$low),Add(Abs($close),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($close,$low),Add(Sub($high,$low),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($close,$vwap),Add(Abs($vwap),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($close,Mean($close,10)),Add(Abs(Mean($close,10)),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($close,Mean($close,20)),Add(Abs(Mean($close,20)),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div($volume,Add(Mean($volume,20),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div($volume,Add(Mean($volume,10),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Corr($close,$volume,10)",
+      "group": "new"
+    },
+    {
+      "expr_text": "Corr(Div(Sub($close,Ref($close,1)),Add(Abs(Ref($close,1)),Constant(0.01))),$volume,20)",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($vwap,Ref($vwap,5)),Add(Abs(Ref($vwap,5)),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Std(Div(Sub($close,Ref($close,1)),Add(Abs(Ref($close,1)),Constant(0.01))),20)",
+      "group": "new"
+    },
+    {
+      "expr_text": "Mean(Div(Sub($high,$low),Add(Abs($close),Constant(0.01))),10)",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub(Add($high,$low),Mul(Constant(2.0),$vwap)),Add(Abs($vwap),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($close,Max($high,20)),Add(Abs(Max($high,20)),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Div(Sub($close,Min($low,20)),Add(Abs(Min($low,20)),Constant(0.01)))",
+      "group": "new"
+    },
+    {
+      "expr_text": "Mul(Div(Sub($close,$open),Add(Abs($open),Constant(0.01))),Div($volume,Add(Mean($volume,20),Constant(0.01))))",
+      "group": "new"
+    }
+  ]
+}

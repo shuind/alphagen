@@ -15,3 +15,9 @@ outputs/
 *.zip
 download_kaggle_output.ps1
 kaggle/
+embedding_outputs/
+context_outputs*/
+context_runs*/
+context_file_pretrain_smoke/
+context_seed_*_smoke/
+platform_runtime/

@@ -1,5 +1,6 @@
 from typing import List, Union, Optional, Tuple
 from enum import IntEnum
+import os
 import numpy as np
 import pandas as pd
 import torch
@@ -42,7 +43,8 @@ class StockData:
             return
         import qlib
         from qlib.config import REG_CN
-        qlib.init(provider_uri="~/.qlib/qlib_data/cn_data_rolling", region=REG_CN)
+        provider_uri = os.environ.get("QLIB_PROVIDER_URI", "~/.qlib/qlib_data/cn_data_rolling")
+        qlib.init(provider_uri=provider_uri, region=REG_CN)
         cls._qlib_initialized = True
 
     def _load_exprs(self, exprs: Union[str, List[str]]) -> pd.DataFrame:

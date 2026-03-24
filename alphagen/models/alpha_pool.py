@@ -9,7 +9,20 @@ from torch import Tensor
 from alphagen.data.calculator import AlphaCalculator
 from alphagen.config import MAX_EXPR_LENGTH
 
-from alphagen.data.expression import Expression
+from alphagen.data.expression import (
+    BinaryOperator,
+    Constant,
+    Corr,
+    Cov,
+    Div,
+    Expression,
+    Greater,
+    Less,
+    PairRollingOperator,
+    RollingOperator,
+    Sub,
+    UnaryOperator,
+)
 from alphagen.utils.correlation import batch_pearsonr, batch_spearmanr
 from alphagen.utils.pytorch_utils import masked_mean_std
 from alphagen_qlib.stock_data import StockData
@@ -57,10 +70,13 @@ class AlphaPool(AlphaPoolBase):
         self.exprs: List[Optional[Expression]] = [None for _ in range(capacity + 1)]
         self.expr_tokens: List[Optional[List[str]]] = [None for _ in range(capacity + 1)]
         self.expr_bigrams: List[Optional[Set[Tuple[str, str]]]] = [None for _ in range(capacity + 1)]
+        self.expr_keys: List[Optional[str]] = [None for _ in range(capacity + 1)]
         self.single_ics: np.ndarray = np.zeros(capacity + 1)
         self.mutual_ics: np.ndarray = np.identity(capacity + 1)
         self.weights: np.ndarray = np.zeros(capacity + 1)
         self.best_ic_ret: float = -1.
+        self._single_ic_cache: Dict[str, float] = {}
+        self._mutual_ic_cache: Dict[Tuple[str, str], float] = {}
 
         self.ic_lower_bound = ic_lower_bound or -1.
         self.l1_alpha = l1_alpha
@@ -88,7 +104,26 @@ class AlphaPool(AlphaPoolBase):
             "weights": list(self.weights[:self.size])
         }
 
+    def _expr_key(self, expr: Expression) -> str:
+        return str(expr)
+
+    def _mutual_key(self, lhs_key: str, rhs_key: str) -> Tuple[str, str]:
+        return (lhs_key, rhs_key) if lhs_key <= rhs_key else (rhs_key, lhs_key)
+
     def try_new_expr(self, expr: Expression, token_seq: Optional[List[str]] = None) -> Tuple[float, Dict]:
+        if not self._semantic_validate(expr):
+            info = {
+                "re": 0.0,
+                "ri_func": 0.0,
+                "ri_struct": 0.0,
+                "ri_reg": 0.0,
+                "reward_total": 0.0,
+                "reward_pool": 0.0,
+                "ic_ensemble": 0.0,
+                "increment": 0.0,
+                "invalid": True,
+            }
+            return 0.0, info
         ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=0.99)
         if ic_ret is None or ic_mut is None or np.isnan(ic_ret) or np.isnan(ic_mut).any():
             info = {
@@ -210,18 +245,94 @@ class AlphaPool(AlphaPoolBase):
         expr: Expression,
         ic_mut_threshold: Optional[float] = None
     ) -> Tuple[float, Optional[List[float]]]:
-        single_ic = self.calculator.calc_single_IC_ret(expr)
+        if not self._semantic_validate(expr):
+            return 0.0, None
+        expr_key = self._expr_key(expr)
+        if expr_key in self._single_ic_cache:
+            single_ic = self._single_ic_cache[expr_key]
+        else:
+            single_ic = self.calculator.calc_single_IC_ret(expr)
+            self._single_ic_cache[expr_key] = single_ic
         if not self._under_thres_alpha and single_ic < self.ic_lower_bound:
             return single_ic, None
 
-        mutual_ics = []
+        mutual_ics: List[Optional[float]] = [None for _ in range(self.size)]
+        batch_exprs: List[Expression] = []
+        batch_keys: List[Tuple[str, str]] = []
+        batch_indices: List[int] = []
         for i in range(self.size):
-            mutual_ic = self.calculator.calc_mutual_IC(expr, self.exprs[i])
-            if ic_mut_threshold is not None and mutual_ic > ic_mut_threshold:
-                return single_ic, None
-            mutual_ics.append(mutual_ic)
+            existing_expr = self.exprs[i]
+            existing_key = self.expr_keys[i]
+            assert existing_expr is not None and existing_key is not None
+            cache_key = self._mutual_key(expr_key, existing_key)
+            if cache_key in self._mutual_ic_cache:
+                mutual_ic = self._mutual_ic_cache[cache_key]
+                if ic_mut_threshold is not None and mutual_ic > ic_mut_threshold:
+                    return single_ic, None
+                mutual_ics[i] = mutual_ic
+            else:
+                batch_exprs.append(existing_expr)
+                batch_keys.append(cache_key)
+                batch_indices.append(i)
 
-        return single_ic, mutual_ics
+        if batch_exprs:
+            if hasattr(self.calculator, "calc_mutual_IC_batch"):
+                batch_values = self.calculator.calc_mutual_IC_batch(expr, batch_exprs)
+            else:
+                batch_values = [self.calculator.calc_mutual_IC(expr, other) for other in batch_exprs]
+            for idx, cache_key, mutual_ic in zip(batch_indices, batch_keys, batch_values):
+                self._mutual_ic_cache[cache_key] = mutual_ic
+                if ic_mut_threshold is not None and mutual_ic > ic_mut_threshold:
+                    return single_ic, None
+                mutual_ics[idx] = mutual_ic
+
+        return single_ic, [float(v) for v in mutual_ics]
+
+    def _semantic_validate(self, expr: Expression) -> bool:
+        for node in self._iter_expr_nodes(expr):
+            if isinstance(node, (Corr, Cov)) and self._expr_equal(node._lhs, node._rhs):
+                return False
+            if isinstance(node, (Sub, Div)) and self._expr_equal(node._lhs, node._rhs):
+                return False
+            if isinstance(node, (Less, Greater)):
+                if self._is_bool_chain(node._lhs) and not self._is_bool_chain(node._rhs):
+                    return False
+                if self._is_bool_chain(node._rhs) and not self._is_bool_chain(node._lhs):
+                    return False
+                if self._is_unrealistic_negative_compare(node._lhs, node._rhs):
+                    return False
+                if self._is_unrealistic_negative_compare(node._rhs, node._lhs):
+                    return False
+        return True
+
+    def _iter_expr_nodes(self, expr: Expression):
+        yield expr
+        if isinstance(expr, UnaryOperator):
+            yield from self._iter_expr_nodes(expr._operand)
+        elif isinstance(expr, BinaryOperator):
+            yield from self._iter_expr_nodes(expr._lhs)
+            yield from self._iter_expr_nodes(expr._rhs)
+        elif isinstance(expr, RollingOperator):
+            yield from self._iter_expr_nodes(expr._operand)
+        elif isinstance(expr, PairRollingOperator):
+            yield from self._iter_expr_nodes(expr._lhs)
+            yield from self._iter_expr_nodes(expr._rhs)
+
+    def _expr_equal(self, lhs: Expression, rhs: Expression) -> bool:
+        return str(lhs) == str(rhs)
+
+    def _is_bool_chain(self, expr: Expression) -> bool:
+        return isinstance(expr, (Less, Greater))
+
+    def _is_unrealistic_negative_compare(self, lhs: Expression, rhs: Expression) -> bool:
+        if not isinstance(rhs, Constant):
+            return False
+        if rhs._value >= 0:
+            return False
+        lhs_repr = str(lhs).lower()
+        if "$volume" in lhs_repr or "$open" in lhs_repr or "$close" in lhs_repr or "$high" in lhs_repr or "$low" in lhs_repr or "$vwap" in lhs_repr:
+            return True
+        return False
 
     def _add_factor(
         self,
@@ -234,6 +345,7 @@ class AlphaPool(AlphaPoolBase):
             self._pop()
         n = self.size
         self.exprs[n] = expr
+        self.expr_keys[n] = self._expr_key(expr)
         self.expr_tokens[n] = token_seq
         if token_seq is not None and len(token_seq) >= 2:
             self.expr_bigrams[n] = self._token_bigrams(token_seq)
@@ -256,6 +368,7 @@ class AlphaPool(AlphaPoolBase):
         if i == j:
             return
         self.exprs[i], self.exprs[j] = self.exprs[j], self.exprs[i]
+        self.expr_keys[i], self.expr_keys[j] = self.expr_keys[j], self.expr_keys[i]
         self.expr_tokens[i], self.expr_tokens[j] = self.expr_tokens[j], self.expr_tokens[i]
         self.expr_bigrams[i], self.expr_bigrams[j] = self.expr_bigrams[j], self.expr_bigrams[i]
         self.single_ics[i], self.single_ics[j] = self.single_ics[j], self.single_ics[i]
