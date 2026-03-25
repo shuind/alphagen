@@ -46,6 +46,13 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "cluster_count",
         "cluster_mean_re",
         "cluster_positive_re_rate",
+        "ri_func_eval_ms",
+        "ri_func_stack_ms",
+        "ri_func_lstsq_ms",
+        "ri_func_metric_ms",
+        "ri_func_total_ms",
+        "ri_func_used_k",
+        "ri_func_used_sample",
     ]
     write_header = not os.path.isfile(path)
     row = {name: metrics.get(name, math.nan) for name in fieldnames}
@@ -127,6 +134,13 @@ class CustomCallback(BaseCallback):
                 "cluster_count": getattr(self.pool, "last_reward_info", {}).get("cluster_count", math.nan),
                 "cluster_mean_re": getattr(self.pool, "last_reward_info", {}).get("cluster_mean_re", math.nan),
                 "cluster_positive_re_rate": getattr(self.pool, "last_reward_info", {}).get("cluster_positive_re_rate", math.nan),
+                "ri_func_eval_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_eval_ms", math.nan),
+                "ri_func_stack_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_stack_ms", math.nan),
+                "ri_func_lstsq_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_lstsq_ms", math.nan),
+                "ri_func_metric_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_metric_ms", math.nan),
+                "ri_func_total_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_total_ms", math.nan),
+                "ri_func_used_k": getattr(self.pool, "last_reward_info", {}).get("ri_func_used_k", math.nan),
+                "ri_func_used_sample": getattr(self.pool, "last_reward_info", {}).get("ri_func_used_sample", math.nan),
             },
         )
         self.save_checkpoint()
@@ -176,6 +190,9 @@ def main(
     ri_struct_value_bonus: float = 0.1,
     ri_struct_underexplore_power: float = 1.0,
     ri_func_metric: str = "rankic",
+    ri_func_topk: int = 8,
+    ri_func_sample_size: int = 128,
+    ri_func_rankic_on_cpu: bool = True,
     ri_admission_gate: bool = False,
     reward_per_step: float = REWARD_PER_STEP,
     ri_reg_l0: Optional[float] = None,
@@ -227,13 +244,16 @@ def main(
     # You can re-implement AlphaCalculator instead of using QLibStockDataCalculator.
     data_train = StockData(instrument=market,
                            start_time='2010-01-01',
-                           end_time='2019-12-31')
+                           end_time='2019-12-31',
+                           device=device)
     data_valid = StockData(instrument=market,
                            start_time='2020-01-01',
-                           end_time='2020-12-31')
+                           end_time='2020-12-31',
+                           device=device)
     data_test = StockData(instrument=market,
                           start_time='2021-01-01',
-                          end_time='2022-12-31')
+                          end_time='2022-12-31',
+                          device=device)
     calculator_train = QLibStockDataCalculator(data_train, target)
     calculator_valid = QLibStockDataCalculator(data_valid, target)
     calculator_test = QLibStockDataCalculator(data_test, target)
@@ -253,6 +273,9 @@ def main(
         ri_struct_value_bonus=ri_struct_value_bonus,
         ri_struct_underexplore_power=ri_struct_underexplore_power,
         ri_func_metric=ri_func_metric,
+        ri_func_topk=ri_func_topk,
+        ri_func_sample_size=ri_func_sample_size,
+        ri_func_rankic_on_cpu=ri_func_rankic_on_cpu,
         ri_admission_gate=ri_admission_gate,
         ri_reg_l0=ri_reg_l0,
         ri_struct_topk=ri_struct_topk,
@@ -293,6 +316,9 @@ def main(
                     "ri_struct_value_bonus": ri_struct_value_bonus,
                     "ri_struct_underexplore_power": ri_struct_underexplore_power,
                     "ri_func_metric": ri_func_metric,
+                    "ri_func_topk": ri_func_topk,
+                    "ri_func_sample_size": ri_func_sample_size,
+                    "ri_func_rankic_on_cpu": ri_func_rankic_on_cpu,
                     "ri_admission_gate": ri_admission_gate,
                     "reward_per_step": reward_per_step,
                     "ri_reg_l0": ri_reg_l0,
@@ -417,6 +443,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ri_struct_value_bonus", type=float, default=0.1)
     parser.add_argument("--ri_struct_underexplore_power", type=float, default=1.0)
     parser.add_argument("--ri_func_metric", type=str, default="rankic", choices=["rankic", "ic"])
+    parser.add_argument("--ri_func_topk", type=int, default=8)
+    parser.add_argument("--ri_func_sample_size", type=int, default=128)
+    parser.add_argument("--ri_func_rankic_on_cpu", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ri_admission_gate", action="store_true")
     parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
     parser.add_argument("--ri_reg_l0", type=float, default=None)
@@ -458,6 +487,9 @@ if __name__ == '__main__':
             ri_struct_value_bonus=args.ri_struct_value_bonus,
             ri_struct_underexplore_power=args.ri_struct_underexplore_power,
             ri_func_metric=args.ri_func_metric,
+            ri_func_topk=args.ri_func_topk,
+            ri_func_sample_size=args.ri_func_sample_size,
+            ri_func_rankic_on_cpu=args.ri_func_rankic_on_cpu,
             ri_admission_gate=args.ri_admission_gate,
             reward_per_step=args.reward_per_step,
             ri_reg_l0=args.ri_reg_l0,

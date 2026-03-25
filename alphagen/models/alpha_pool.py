@@ -1,5 +1,6 @@
 from itertools import count
 import math
+import time
 from typing import Any, Dict, List, Optional, Tuple, Set
 from abc import ABCMeta, abstractmethod
 
@@ -64,6 +65,9 @@ class AlphaPool(AlphaPoolBase):
         ri_struct_value_bonus: float = 0.1,
         ri_struct_underexplore_power: float = 1.0,
         ri_func_metric: str = "rankic",
+        ri_func_topk: int = 8,
+        ri_func_sample_size: int = 128,
+        ri_func_rankic_on_cpu: bool = True,
         ri_admission_gate: bool = False,
         ri_topk: int = 5,
         ri_struct_topk: int = 5,
@@ -93,6 +97,9 @@ class AlphaPool(AlphaPoolBase):
         self.ri_struct_value_bonus = float(ri_struct_value_bonus)
         self.ri_struct_underexplore_power = float(ri_struct_underexplore_power)
         self.ri_func_metric = str(ri_func_metric)
+        self.ri_func_topk = max(1, int(ri_func_topk))
+        self.ri_func_sample_size = max(0, int(ri_func_sample_size))
+        self.ri_func_rankic_on_cpu = bool(ri_func_rankic_on_cpu)
         self.ri_admission_gate = bool(ri_admission_gate)
         self.ri_topk = ri_topk
         self.ri_struct_topk = ri_struct_topk
@@ -100,6 +107,7 @@ class AlphaPool(AlphaPoolBase):
 
         self.eval_cnt = 0
         self.last_reward_info: Dict[str, Any] = {}
+        self._ri_func_timing: Dict[str, Any] = {}
         self._structure_clusters: List[Dict[str, Any]] = []
 
     @property
@@ -198,6 +206,8 @@ class AlphaPool(AlphaPoolBase):
             "admission_gate_enabled": bool(self.ri_admission_gate and self._use_v2),
             "admission_gate_passed": bool((not self.ri_admission_gate) or (re > 0)),
         }
+        if isinstance(getattr(self, "_ri_func_timing", None), dict):
+            info.update(getattr(self, "_ri_func_timing"))
         if cluster_info:
             info.update(cluster_info)
         self.last_reward_info = info
@@ -383,22 +393,74 @@ class AlphaPool(AlphaPoolBase):
         return -float(np.mean(topk))
 
     def _calc_ri_func_v2(self, expr: Expression) -> float:
+        t0 = time.perf_counter()
         candidate_value = self.calculator._calc_alpha(expr)
+        t1 = time.perf_counter()
         target_value = getattr(self.calculator, "target_value", None)
         if target_value is None:
+            self._ri_func_timing = {"ri_func_total_ms": 0.0}
             return 0.0
         if self.size <= 0:
             metric = batch_spearmanr(candidate_value, target_value) if self.ri_func_metric == "rankic" else batch_pearsonr(candidate_value, target_value)
+            t2 = time.perf_counter()
+            self._ri_func_timing = {
+                "ri_func_eval_ms": (t1 - t0) * 1000.0,
+                "ri_func_stack_ms": 0.0,
+                "ri_func_lstsq_ms": 0.0,
+                "ri_func_metric_ms": (t2 - t1) * 1000.0,
+                "ri_func_total_ms": (t2 - t0) * 1000.0,
+                "ri_func_used_k": 0,
+                "ri_func_used_sample": 0,
+            }
             return float(metric.mean().item())
 
-        pool_values = torch.stack([self.calculator._calc_alpha(self.exprs[i]) for i in range(self.size)], dim=0)
-        x = pool_values.permute(1, 2, 0).reshape(-1, self.size).float()
+        used_k = min(self.size, self.ri_func_topk)
+        abs_w = np.abs(self.weights[:self.size])
+        if np.all(np.isnan(abs_w)):
+            idxs = np.arange(self.size)
+        else:
+            idxs = np.argsort(np.nan_to_num(abs_w, nan=0.0))[-used_k:]
+        sel_exprs = [self.exprs[int(i)] for i in idxs]
+        pool_values = torch.stack([self.calculator._calc_alpha(e) for e in sel_exprs], dim=0)
+        t2 = time.perf_counter()
+        x = pool_values.permute(1, 2, 0).reshape(-1, used_k).float()
         y = candidate_value.reshape(-1).float()
+        used_sample = 0
+        if self.ri_func_sample_size > 0 and x.shape[0] > self.ri_func_sample_size:
+            sample_idx = torch.randperm(x.shape[0], device=x.device)[: self.ri_func_sample_size]
+            x = x[sample_idx]
+            y = y[sample_idx]
+            used_sample = int(self.ri_func_sample_size)
+        else:
+            used_sample = int(x.shape[0])
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
         beta = torch.linalg.lstsq(x, y).solution
-        resid = (y - x @ beta).view_as(candidate_value)
-        metric = batch_spearmanr(resid, target_value) if self.ri_func_metric == "rankic" else batch_pearsonr(resid, target_value)
+        t3 = time.perf_counter()
+        resid_flat = y - x @ beta
+        # For sampled path, metric is computed on sampled vectors to reduce memory footprint.
+        if self.ri_func_metric == "rankic":
+            if self.ri_func_rankic_on_cpu:
+                resid_metric = resid_flat.detach().cpu().view(1, -1)
+                target_metric = y.detach().cpu().view(1, -1)
+            else:
+                resid_metric = resid_flat.view(1, -1)
+                target_metric = y.view(1, -1)
+            metric = batch_spearmanr(resid_metric, target_metric)
+        else:
+            resid_metric = resid_flat.view(1, -1)
+            target_metric = y.view(1, -1)
+            metric = batch_pearsonr(resid_metric, target_metric)
+        t4 = time.perf_counter()
+        self._ri_func_timing = {
+            "ri_func_eval_ms": (t1 - t0) * 1000.0,
+            "ri_func_stack_ms": (t2 - t1) * 1000.0,
+            "ri_func_lstsq_ms": (t3 - t2) * 1000.0,
+            "ri_func_metric_ms": (t4 - t3) * 1000.0,
+            "ri_func_total_ms": (t4 - t0) * 1000.0,
+            "ri_func_used_k": int(used_k),
+            "ri_func_used_sample": int(used_sample),
+        }
         return float(metric.mean().item())
 
     def _calc_ri_struct(self, token_seq: Optional[List[str]]) -> float:
