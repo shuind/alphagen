@@ -1,6 +1,8 @@
 from itertools import count
 import math
+import os
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Set
 from abc import ABCMeta, abstractmethod
 
@@ -113,12 +115,84 @@ class AlphaPool(AlphaPoolBase):
         self._structure_clusters: List[Dict[str, Any]] = []
         self._timing_total: Dict[str, float] = {}
         self._timing_count: Dict[str, int] = {}
+        self._single_ic_cache_size = max(0, int(os.getenv("ALPHAGEN_SINGLE_IC_CACHE_SIZE", "8192")))
+        self._single_ic_cache: "OrderedDict[str, float]" = OrderedDict()
+        self._single_ic_cache_hits = 0
+        self._single_ic_cache_misses = 0
+        self._mutual_ic_cache_size = max(0, int(os.getenv("ALPHAGEN_MUTUAL_IC_CACHE_SIZE", "131072")))
+        self._mutual_ic_cache: "OrderedDict[Tuple[str, str], float]" = OrderedDict()
+        self._mutual_ic_cache_hits = 0
+        self._mutual_ic_cache_misses = 0
 
     def _record_timing(self, name: str, elapsed_sec: float) -> None:
         if not self.profile_timing:
             return
         self._timing_total[name] = float(self._timing_total.get(name, 0.0) + elapsed_sec)
         self._timing_count[name] = int(self._timing_count.get(name, 0) + 1)
+
+    def _lru_get(self, cache: "OrderedDict", key: Any) -> Any:
+        value = cache.get(key)
+        if value is None:
+            return None
+        cache.move_to_end(key)
+        return value
+
+    def _lru_put(self, cache: "OrderedDict", key: Any, value: Any, max_size: int) -> None:
+        if max_size <= 0:
+            return
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > max_size:
+            cache.popitem(last=False)
+
+    def _get_single_ic_cached(self, expr: Expression) -> float:
+        key = self._expr_key(expr)
+        cached = self._lru_get(self._single_ic_cache, key)
+        if cached is not None:
+            self._single_ic_cache_hits += 1
+            return float(cached)
+        self._single_ic_cache_misses += 1
+        value = float(self.calculator.calc_single_IC_ret(expr))
+        self._lru_put(self._single_ic_cache, key, value, self._single_ic_cache_size)
+        return value
+
+    def _get_mutual_ic_cached(self, lhs: Expression, rhs: Expression) -> float:
+        lhs_key = self._expr_key(lhs)
+        rhs_key = self._expr_key(rhs)
+        key = self._mutual_key(lhs_key, rhs_key)
+        cached = self._lru_get(self._mutual_ic_cache, key)
+        if cached is not None:
+            self._mutual_ic_cache_hits += 1
+            return float(cached)
+        self._mutual_ic_cache_misses += 1
+        value = float(self.calculator.calc_mutual_IC(lhs, rhs))
+        self._lru_put(self._mutual_ic_cache, key, value, self._mutual_ic_cache_size)
+        return value
+
+    def _cache_snapshot(self) -> Dict[str, float]:
+        single_total = self._single_ic_cache_hits + self._single_ic_cache_misses
+        mutual_total = self._mutual_ic_cache_hits + self._mutual_ic_cache_misses
+        info: Dict[str, float] = {
+            "single_ic_cache_size": float(len(self._single_ic_cache)),
+            "single_ic_cache_max_size": float(self._single_ic_cache_size),
+            "single_ic_cache_hits": float(self._single_ic_cache_hits),
+            "single_ic_cache_misses": float(self._single_ic_cache_misses),
+            "single_ic_cache_hit_rate": float(self._single_ic_cache_hits / single_total) if single_total > 0 else 0.0,
+            "mutual_ic_cache_size": float(len(self._mutual_ic_cache)),
+            "mutual_ic_cache_max_size": float(self._mutual_ic_cache_size),
+            "mutual_ic_cache_hits": float(self._mutual_ic_cache_hits),
+            "mutual_ic_cache_misses": float(self._mutual_ic_cache_misses),
+            "mutual_ic_cache_hit_rate": float(self._mutual_ic_cache_hits / mutual_total) if mutual_total > 0 else 0.0,
+        }
+        calc_stats = getattr(self.calculator, "get_cache_stats", None)
+        if callable(calc_stats):
+            try:
+                raw = calc_stats()
+                for k, v in raw.items():
+                    info[k] = float(v)
+            except Exception:
+                pass
+        return info
 
     def profile_snapshot(self) -> Dict[str, Any]:
         totals = dict(self._timing_total)
@@ -260,6 +334,7 @@ class AlphaPool(AlphaPoolBase):
         }
         if isinstance(getattr(self, "_ri_func_timing", None), dict):
             info.update(getattr(self, "_ri_func_timing"))
+        info.update(self._cache_snapshot())
         if self.profile_timing:
             prof = self.profile_snapshot()
             info.update(
@@ -350,13 +425,16 @@ class AlphaPool(AlphaPoolBase):
         expr: Expression,
         ic_mut_threshold: Optional[float] = None
     ) -> Tuple[float, Optional[List[float]]]:
-        single_ic = self.calculator.calc_single_IC_ret(expr)
+        single_ic = self._get_single_ic_cached(expr)
         if not self._under_thres_alpha and single_ic < self.ic_lower_bound:
             return single_ic, None
 
         mutual_ics = []
         for i in range(self.size):
-            mutual_ic = self.calculator.calc_mutual_IC(expr, self.exprs[i])
+            prev_expr = self.exprs[i]
+            if prev_expr is None:
+                raise RuntimeError(f"pool expr[{i}] is None while size={self.size}")
+            mutual_ic = self._get_mutual_ic_cached(expr, prev_expr)
             if ic_mut_threshold is not None and mutual_ic > ic_mut_threshold:
                 return single_ic, None
             mutual_ics.append(mutual_ic)
