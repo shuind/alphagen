@@ -304,6 +304,7 @@ def main(
     ckpt_dir: str = "",
     tb_dir: str = "",
     device: str = "auto",
+    verbose: int = 0,
 ):
     reseed_everything(seed)
 
@@ -452,7 +453,7 @@ def main(
         test_calculator=calculator_test,
         name_prefix=name_prefix,
         timestamp=timestamp,
-        verbose=1,
+        verbose=verbose,
     )
 
     if backbone == "transformer":
@@ -486,7 +487,7 @@ def main(
         batch_size=128,
         tensorboard_log=tb_run_dir,
         device=device,
-        verbose=1,
+        verbose=verbose,
     )
     model.learn(
         total_timesteps=steps,
@@ -560,6 +561,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ckpt_dir", type=str, default="")
     parser.add_argument("--tb_dir", type=str, default="")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--verbose", type=int, default=0)
     return parser
 
 
@@ -605,4 +607,5 @@ if __name__ == '__main__':
             ckpt_dir=args.ckpt_dir,
             tb_dir=args.tb_dir,
             device=args.device,
+            verbose=args.verbose,
         )
