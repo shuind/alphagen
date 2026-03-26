@@ -69,6 +69,7 @@ class AlphaPool(AlphaPoolBase):
         ri_func_sample_size: int = 128,
         ri_func_rankic_on_cpu: bool = True,
         ri_admission_gate: bool = False,
+        profile_timing: bool = True,
         ri_topk: int = 5,
         ri_struct_topk: int = 5,
         ri_reg_l0: Optional[float] = None,
@@ -101,6 +102,7 @@ class AlphaPool(AlphaPoolBase):
         self.ri_func_sample_size = max(0, int(ri_func_sample_size))
         self.ri_func_rankic_on_cpu = bool(ri_func_rankic_on_cpu)
         self.ri_admission_gate = bool(ri_admission_gate)
+        self.profile_timing = bool(profile_timing)
         self.ri_topk = ri_topk
         self.ri_struct_topk = ri_struct_topk
         self.ri_reg_l0 = float(ri_reg_l0) if ri_reg_l0 is not None else float(int(0.7 * MAX_EXPR_LENGTH))
@@ -109,6 +111,34 @@ class AlphaPool(AlphaPoolBase):
         self.last_reward_info: Dict[str, Any] = {}
         self._ri_func_timing: Dict[str, Any] = {}
         self._structure_clusters: List[Dict[str, Any]] = []
+        self._timing_total: Dict[str, float] = {}
+        self._timing_count: Dict[str, int] = {}
+
+    def _record_timing(self, name: str, elapsed_sec: float) -> None:
+        if not self.profile_timing:
+            return
+        self._timing_total[name] = float(self._timing_total.get(name, 0.0) + elapsed_sec)
+        self._timing_count[name] = int(self._timing_count.get(name, 0) + 1)
+
+    def profile_snapshot(self) -> Dict[str, Any]:
+        totals = dict(self._timing_total)
+        counts = dict(self._timing_count)
+        tracked_total_sec = float(sum(totals.values()))
+        avg_ms = {
+            f"{k}_avg_ms": (
+                float((totals[k] / max(1, counts.get(k, 0))) * 1000.0)
+                if counts.get(k, 0) > 0 else 0.0
+            )
+            for k in totals.keys()
+        }
+        return {
+            "timing_totals_sec": totals,
+            "timing_counts": counts,
+            "timing_tracked_total_sec": tracked_total_sec,
+            "timing_avg_ms": avg_ms,
+            "eval_cnt": int(self.eval_cnt),
+            "profile_timing_enabled": bool(self.profile_timing),
+        }
 
     @property
     def state(self) -> dict:
@@ -146,8 +176,13 @@ class AlphaPool(AlphaPoolBase):
     def _mutual_key(self, lhs_key: str, rhs_key: str) -> Tuple[str, str]:
         return (lhs_key, rhs_key) if lhs_key <= rhs_key else (rhs_key, lhs_key)
     def try_new_expr(self, expr: Expression, token_seq: Optional[List[str]] = None) -> Tuple[float, Dict]:
+        t_try0 = time.perf_counter()
+        t0 = time.perf_counter()
         ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=0.99)
+        self._record_timing("calc_ics_sec", time.perf_counter() - t0)
         if ic_ret is None or ic_mut is None or np.isnan(ic_ret) or np.isnan(ic_mut).any():
+            self._record_timing("invalid_expr_sec", time.perf_counter() - t_try0)
+            self._record_timing("try_new_expr_total_sec", time.perf_counter() - t_try0)
             info = {
                 "re": 0.0,
                 "ri_func": 0.0,
@@ -161,23 +196,35 @@ class AlphaPool(AlphaPoolBase):
             }
             return 0.0, info
 
+        t0 = time.perf_counter()
         ri_func = self._calc_ri_func_v2(expr) if self._use_v2 and self._use_ri_func else (
             self._calc_ri_func(ic_mut) if self._use_ri_func else 0.0
         )
+        self._record_timing("ri_func_sec", time.perf_counter() - t0)
+        t0 = time.perf_counter()
         ri_reg = self._calc_ri_reg_v2(expr, token_seq) if self._use_v2 and self._use_ri_reg else (
             self._calc_ri_reg(token_seq) if self._use_ri_reg else 0.0
         )
+        self._record_timing("ri_reg_sec", time.perf_counter() - t0)
 
         prev_best_ic_ret = self.best_ic_ret
+        t0 = time.perf_counter()
         self._add_factor(expr, ic_ret, ic_mut, token_seq)
+        self._record_timing("add_factor_sec", time.perf_counter() - t0)
         if self.size > 1:
+            t0 = time.perf_counter()
             new_weights = self._optimize(alpha=self.l1_alpha, lr=5e-4, n_iter=500)
+            self._record_timing("optimize_sec", time.perf_counter() - t0)
             worst_idx = np.argmin(np.abs(new_weights))
             if worst_idx != self.capacity:
                 self.weights[:self.size] = new_weights
+            t0 = time.perf_counter()
             self._pop()
+            self._record_timing("pop_sec", time.perf_counter() - t0)
 
+        t0 = time.perf_counter()
         new_ic_ret = self.evaluate_ensemble()
+        self._record_timing("evaluate_ensemble_sec", time.perf_counter() - t0)
         increment = new_ic_ret - prev_best_ic_ret
         if increment > 0:
             self.best_ic_ret = new_ic_ret
@@ -186,11 +233,16 @@ class AlphaPool(AlphaPoolBase):
         cluster_info: Dict[str, Any] = {}
         ri_struct = 0.0
         if self._use_ri_struct:
+            t0 = time.perf_counter()
             if self._use_v2:
                 ri_struct, cluster_info = self._calc_ri_struct_v2(token_seq, re)
             else:
                 ri_struct = self._calc_ri_struct(token_seq)
+            self._record_timing("ri_struct_sec", time.perf_counter() - t0)
+        t0 = time.perf_counter()
         reward_total, reward_lambda_t = self._compose_reward(re, ri_func, ri_struct, ri_reg)
+        self._record_timing("compose_reward_sec", time.perf_counter() - t0)
+        self._record_timing("try_new_expr_total_sec", time.perf_counter() - t_try0)
         info = {
             "re": float(re),
             "ri_func": float(ri_func),
@@ -208,6 +260,19 @@ class AlphaPool(AlphaPoolBase):
         }
         if isinstance(getattr(self, "_ri_func_timing", None), dict):
             info.update(getattr(self, "_ri_func_timing"))
+        if self.profile_timing:
+            prof = self.profile_snapshot()
+            info.update(
+                {
+                    "profile_try_total_sec": prof["timing_totals_sec"].get("try_new_expr_total_sec", 0.0),
+                    "profile_calc_ics_sec": prof["timing_totals_sec"].get("calc_ics_sec", 0.0),
+                    "profile_ri_func_sec": prof["timing_totals_sec"].get("ri_func_sec", 0.0),
+                    "profile_ri_struct_sec": prof["timing_totals_sec"].get("ri_struct_sec", 0.0),
+                    "profile_ri_reg_sec": prof["timing_totals_sec"].get("ri_reg_sec", 0.0),
+                    "profile_optimize_sec": prof["timing_totals_sec"].get("optimize_sec", 0.0),
+                    "profile_eval_ensemble_sec": prof["timing_totals_sec"].get("evaluate_ensemble_sec", 0.0),
+                }
+            )
         if cluster_info:
             info.update(cluster_info)
         self.last_reward_info = info

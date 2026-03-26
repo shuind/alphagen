@@ -3,6 +3,7 @@ import csv
 import json
 import math
 import os
+import time
 from typing import Optional, Union, List
 from datetime import datetime
 
@@ -53,6 +54,22 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "ri_func_total_ms",
         "ri_func_used_k",
         "ri_func_used_sample",
+        "profile_try_total_sec",
+        "profile_calc_ics_sec",
+        "profile_ri_func_sec",
+        "profile_ri_struct_sec",
+        "profile_ri_reg_sec",
+        "profile_add_factor_sec",
+        "profile_optimize_sec",
+        "profile_pop_sec",
+        "profile_eval_ensemble_sec",
+        "profile_compose_reward_sec",
+        "profile_invalid_expr_sec",
+        "profile_tracked_total_sec",
+        "profile_rollout_wall_sec",
+        "profile_test_ensemble_sec",
+        "profile_save_ckpt_sec",
+        "profile_tracked_ratio",
     ]
     write_header = not os.path.isfile(path)
     row = {name: metrics.get(name, math.nan) for name in fieldnames}
@@ -84,6 +101,10 @@ class CustomCallback(BaseCallback):
 
         self.valid_calculator = valid_calculator
         self.test_calculator = test_calculator
+        self._last_rollout_ts: Optional[float] = None
+        self._rollout_wall_total_sec: float = 0.0
+        self._test_ensemble_total_sec: float = 0.0
+        self._save_ckpt_total_sec: float = 0.0
 
         if timestamp is None:
             self.timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
@@ -101,11 +122,17 @@ class CustomCallback(BaseCallback):
 
     def _on_rollout_end(self) -> None:
         assert self.logger is not None
+        now_ts = time.perf_counter()
+        if self._last_rollout_ts is not None:
+            self._rollout_wall_total_sec += max(0.0, now_ts - self._last_rollout_ts)
+        self._last_rollout_ts = now_ts
         self.logger.record('pool/size', self.pool.size)
         self.logger.record('pool/significant', (np.abs(self.pool.weights[:self.pool.size]) > 1e-4).sum())
         self.logger.record('pool/best_ic_ret', self.pool.best_ic_ret)
         self.logger.record('pool/eval_cnt', self.pool.eval_cnt)
+        t_test0 = time.perf_counter()
         ic_test, rank_ic_test = self.pool.test_ensemble(self.test_calculator)
+        self._test_ensemble_total_sec += max(0.0, time.perf_counter() - t_test0)
         self.logger.record('test/ic', ic_test)
         self.logger.record('test/rank_ic', rank_ic_test)
         rank_ic_test_value = float(rank_ic_test) if rank_ic_test is not None else math.nan
@@ -114,6 +141,22 @@ class CustomCallback(BaseCallback):
             mean_ic = float(np.nanmean(self.pool.single_ics[:pool_size]))
         else:
             mean_ic = math.nan
+        profile = {}
+        if hasattr(self.pool, "profile_snapshot"):
+            try:
+                profile = self.pool.profile_snapshot()  # type: ignore[attr-defined]
+            except Exception:
+                profile = {}
+        totals = profile.get("timing_totals_sec", {}) if isinstance(profile, dict) else {}
+        tracked_total_sec = float(profile.get("timing_tracked_total_sec", 0.0)) if isinstance(profile, dict) else 0.0
+        t_save0 = time.perf_counter()
+        self.save_checkpoint()
+        self._save_ckpt_total_sec += max(0.0, time.perf_counter() - t_save0)
+        tracked_with_cb = tracked_total_sec + self._test_ensemble_total_sec + self._save_ckpt_total_sec
+        tracked_ratio = (
+            tracked_with_cb / max(self._rollout_wall_total_sec, 1e-12)
+            if self._rollout_wall_total_sec > 0 else math.nan
+        )
         log_metrics_csv(
             self.run_dir or self.save_path,
             self.num_timesteps,
@@ -141,9 +184,25 @@ class CustomCallback(BaseCallback):
                 "ri_func_total_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_total_ms", math.nan),
                 "ri_func_used_k": getattr(self.pool, "last_reward_info", {}).get("ri_func_used_k", math.nan),
                 "ri_func_used_sample": getattr(self.pool, "last_reward_info", {}).get("ri_func_used_sample", math.nan),
+                "profile_try_total_sec": totals.get("try_new_expr_total_sec", math.nan),
+                "profile_calc_ics_sec": totals.get("calc_ics_sec", math.nan),
+                "profile_ri_func_sec": totals.get("ri_func_sec", math.nan),
+                "profile_ri_struct_sec": totals.get("ri_struct_sec", math.nan),
+                "profile_ri_reg_sec": totals.get("ri_reg_sec", math.nan),
+                "profile_add_factor_sec": totals.get("add_factor_sec", math.nan),
+                "profile_optimize_sec": totals.get("optimize_sec", math.nan),
+                "profile_pop_sec": totals.get("pop_sec", math.nan),
+                "profile_eval_ensemble_sec": totals.get("evaluate_ensemble_sec", math.nan),
+                "profile_compose_reward_sec": totals.get("compose_reward_sec", math.nan),
+                "profile_invalid_expr_sec": totals.get("invalid_expr_sec", math.nan),
+                "profile_tracked_total_sec": tracked_with_cb,
+                "profile_rollout_wall_sec": self._rollout_wall_total_sec,
+                "profile_test_ensemble_sec": self._test_ensemble_total_sec,
+                "profile_save_ckpt_sec": self._save_ckpt_total_sec,
+                "profile_tracked_ratio": tracked_ratio,
             },
         )
-        self.save_checkpoint()
+        self._write_profile_summary()
 
     def save_checkpoint(self):
         path = os.path.join(self.save_path, f'{self.num_timesteps}_steps')
@@ -152,6 +211,47 @@ class CustomCallback(BaseCallback):
             print(f'Saving model checkpoint to {path}')
         with open(f'{path}_pool.json', 'w') as f:
             json.dump(self.pool.to_dict(), f)
+
+    def _write_profile_summary(self) -> None:
+        out_dir = self.run_dir or self.save_path
+        if not out_dir:
+            return
+        profile = {}
+        if hasattr(self.pool, "profile_snapshot"):
+            try:
+                profile = self.pool.profile_snapshot()  # type: ignore[attr-defined]
+            except Exception:
+                profile = {}
+        totals = profile.get("timing_totals_sec", {}) if isinstance(profile, dict) else {}
+        tracked_pool_sec = float(profile.get("timing_tracked_total_sec", 0.0)) if isinstance(profile, dict) else 0.0
+        tracked_all_sec = tracked_pool_sec + self._test_ensemble_total_sec + self._save_ckpt_total_sec
+        rollout_wall = self._rollout_wall_total_sec
+        ratio = tracked_all_sec / rollout_wall if rollout_wall > 0 else None
+        components = dict(totals)
+        components["test_ensemble_sec"] = self._test_ensemble_total_sec
+        components["save_checkpoint_sec"] = self._save_ckpt_total_sec
+        sorted_components = sorted(
+            [{"name": k, "seconds": float(v)} for k, v in components.items()],
+            key=lambda x: x["seconds"],
+            reverse=True,
+        )
+        payload = {
+            "run_id": os.path.basename(self.run_dir or ""),
+            "timesteps": int(self.num_timesteps),
+            "eval_cnt": int(getattr(self.pool, "eval_cnt", 0)),
+            "tracked_pool_sec": tracked_pool_sec,
+            "tracked_all_sec": tracked_all_sec,
+            "rollout_wall_sec": rollout_wall,
+            "tracked_ratio": ratio,
+            "components": sorted_components,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "profile_summary.json"), "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def show_pool_state(self):
         state = self.pool.state
@@ -194,6 +294,7 @@ def main(
     ri_func_sample_size: int = 128,
     ri_func_rankic_on_cpu: bool = True,
     ri_admission_gate: bool = False,
+    profile_timing: bool = True,
     reward_per_step: float = REWARD_PER_STEP,
     ri_reg_l0: Optional[float] = None,
     ri_struct_topk: int = 5,
@@ -243,8 +344,8 @@ def main(
 
     # You can re-implement AlphaCalculator instead of using QLibStockDataCalculator.
     data_train = StockData(instrument=market,
-                           start_time='2010-01-01',
-                           end_time='2019-12-31',
+                           start_time='2014-01-01',
+                           end_time='2018-12-31',
                            device=device)
     data_valid = StockData(instrument=market,
                            start_time='2020-01-01',
@@ -277,10 +378,11 @@ def main(
         ri_func_sample_size=ri_func_sample_size,
         ri_func_rankic_on_cpu=ri_func_rankic_on_cpu,
         ri_admission_gate=ri_admission_gate,
+        profile_timing=profile_timing,
         ri_reg_l0=ri_reg_l0,
         ri_struct_topk=ri_struct_topk,
     )
-    env = AlphaEnv(pool=pool, device=device, print_expr=True, reward_per_step=reward_per_step)
+    env = AlphaEnv(pool=pool, device=device, print_expr=False, reward_per_step=reward_per_step)
 
     if run_name:
         name_prefix = run_name
@@ -320,6 +422,7 @@ def main(
                     "ri_func_sample_size": ri_func_sample_size,
                     "ri_func_rankic_on_cpu": ri_func_rankic_on_cpu,
                     "ri_admission_gate": ri_admission_gate,
+                    "profile_timing": profile_timing,
                     "reward_per_step": reward_per_step,
                     "ri_reg_l0": ri_reg_l0,
                     "ri_struct_topk": ri_struct_topk,
@@ -447,6 +550,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ri_func_sample_size", type=int, default=128)
     parser.add_argument("--ri_func_rankic_on_cpu", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ri_admission_gate", action="store_true")
+    parser.add_argument("--profile_timing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
     parser.add_argument("--ri_reg_l0", type=float, default=None)
     parser.add_argument("--ri_struct_topk", type=int, default=5)
@@ -491,6 +595,7 @@ if __name__ == '__main__':
             ri_func_sample_size=args.ri_func_sample_size,
             ri_func_rankic_on_cpu=args.ri_func_rankic_on_cpu,
             ri_admission_gate=args.ri_admission_gate,
+            profile_timing=args.profile_timing,
             reward_per_step=args.reward_per_step,
             ri_reg_l0=args.ri_reg_l0,
             ri_struct_topk=args.ri_struct_topk,
