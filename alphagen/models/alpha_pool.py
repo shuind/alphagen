@@ -374,8 +374,9 @@ class AlphaPool(AlphaPoolBase):
         best_weights = weights.cpu().detach().numpy()
         iter_cnt = 0
         for it in count():
-            ret_ic_sum = (weights * ics_ret).sum()
-            mut_ic_sum = (torch.outer(weights, weights) * ics_mut).sum()
+            # Equivalent quadratic form, but avoids allocating outer(weights, weights) each iteration.
+            ret_ic_sum = torch.dot(weights, ics_ret)
+            mut_ic_sum = torch.dot(weights, torch.mv(ics_mut, weights))
             loss_ic = mut_ic_sum - 2 * ret_ic_sum + 1
             loss_ic_curr = loss_ic.item()
 
@@ -402,7 +403,12 @@ class AlphaPool(AlphaPoolBase):
 
     def _optimize_lstsq(self) -> np.ndarray:
         try:
-            return np.linalg.lstsq(self.mutual_ics[:self.size, :self.size],self.single_ics[:self.size])[0]
+            a = self.mutual_ics[:self.size, :self.size]
+            b = self.single_ics[:self.size]
+            try:
+                return np.linalg.solve(a, b)
+            except np.linalg.LinAlgError:
+                return np.linalg.lstsq(a, b, rcond=None)[0]
         except (np.linalg.LinAlgError, ValueError):
             return self.weights[:self.size]
 
