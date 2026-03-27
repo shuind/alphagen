@@ -72,6 +72,8 @@ class AlphaPool(AlphaPoolBase):
         ri_func_rankic_on_cpu: bool = True,
         ri_admission_gate: bool = False,
         profile_timing: bool = True,
+        optimize_every: int = 2,
+        optimize_n_iter: int = 256,
         ri_topk: int = 5,
         ri_struct_topk: int = 5,
         ri_reg_l0: Optional[float] = None,
@@ -105,11 +107,14 @@ class AlphaPool(AlphaPoolBase):
         self.ri_func_rankic_on_cpu = bool(ri_func_rankic_on_cpu)
         self.ri_admission_gate = bool(ri_admission_gate)
         self.profile_timing = bool(profile_timing)
+        self.optimize_every = max(1, int(optimize_every))
+        self.optimize_n_iter = max(1, int(optimize_n_iter))
         self.ri_topk = ri_topk
         self.ri_struct_topk = ri_struct_topk
         self.ri_reg_l0 = float(ri_reg_l0) if ri_reg_l0 is not None else float(int(0.7 * MAX_EXPR_LENGTH))
 
         self.eval_cnt = 0
+        self._optimize_eval_counter = 0
         self.last_reward_info: Dict[str, Any] = {}
         self._ri_func_timing: Dict[str, Any] = {}
         self._structure_clusters: List[Dict[str, Any]] = []
@@ -285,13 +290,17 @@ class AlphaPool(AlphaPoolBase):
         t0 = time.perf_counter()
         self._add_factor(expr, ic_ret, ic_mut, token_seq)
         self._record_timing("add_factor_sec", time.perf_counter() - t0)
+        self._optimize_eval_counter += 1
+        optimize_executed = False
         if self.size > 1:
-            t0 = time.perf_counter()
-            new_weights = self._optimize(alpha=self.l1_alpha, lr=5e-4, n_iter=500)
-            self._record_timing("optimize_sec", time.perf_counter() - t0)
-            worst_idx = np.argmin(np.abs(new_weights))
-            if worst_idx != self.capacity:
-                self.weights[:self.size] = new_weights
+            if self._optimize_eval_counter % self.optimize_every == 0:
+                t0 = time.perf_counter()
+                new_weights = self._optimize(alpha=self.l1_alpha, lr=5e-4, n_iter=self.optimize_n_iter)
+                self._record_timing("optimize_sec", time.perf_counter() - t0)
+                worst_idx = np.argmin(np.abs(new_weights))
+                if worst_idx != self.capacity:
+                    self.weights[:self.size] = new_weights
+                optimize_executed = True
             t0 = time.perf_counter()
             self._pop()
             self._record_timing("pop_sec", time.perf_counter() - t0)
@@ -329,6 +338,9 @@ class AlphaPool(AlphaPoolBase):
             "ic_single": float(ic_ret),
             "re_mode": self.re_mode,
             "reward_lambda_t": float(reward_lambda_t),
+            "optimize_executed": bool(optimize_executed),
+            "optimize_every": int(self.optimize_every),
+            "optimize_n_iter": int(self.optimize_n_iter),
             "admission_gate_enabled": bool(self.ri_admission_gate and self._use_v2),
             "admission_gate_passed": bool((not self.ri_admission_gate) or (re > 0)),
         }
@@ -359,7 +371,7 @@ class AlphaPool(AlphaPoolBase):
             assert ic_ret is not None and ic_mut is not None
             self._add_factor(expr, ic_ret, ic_mut, None)
             assert self.size <= self.capacity
-        self._optimize(alpha=self.l1_alpha, lr=5e-4, n_iter=500)
+        self._optimize(alpha=self.l1_alpha, lr=5e-4, n_iter=self.optimize_n_iter)
 
     def _optimize(self, alpha: float, lr: float, n_iter: int) -> np.ndarray:
         if math.isclose(alpha, 0.): # no L1 regularization

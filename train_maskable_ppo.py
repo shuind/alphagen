@@ -43,6 +43,9 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "RI_struct",
         "RI_reg",
         "reward_lambda_t",
+        "optimize_executed",
+        "optimize_every",
+        "optimize_n_iter",
         "cluster_id",
         "cluster_count",
         "cluster_mean_re",
@@ -188,6 +191,9 @@ class CustomCallback(BaseCallback):
                 "RI_struct": getattr(self.pool, "last_reward_info", {}).get("ri_struct", math.nan),
                 "RI_reg": getattr(self.pool, "last_reward_info", {}).get("ri_reg", math.nan),
                 "reward_lambda_t": getattr(self.pool, "last_reward_info", {}).get("reward_lambda_t", math.nan),
+                "optimize_executed": getattr(self.pool, "last_reward_info", {}).get("optimize_executed", math.nan),
+                "optimize_every": getattr(self.pool, "last_reward_info", {}).get("optimize_every", math.nan),
+                "optimize_n_iter": getattr(self.pool, "last_reward_info", {}).get("optimize_n_iter", math.nan),
                 "cluster_id": getattr(self.pool, "last_reward_info", {}).get("cluster_id", math.nan),
                 "cluster_count": getattr(self.pool, "last_reward_info", {}).get("cluster_count", math.nan),
                 "cluster_mean_re": getattr(self.pool, "last_reward_info", {}).get("cluster_mean_re", math.nan),
@@ -325,6 +331,8 @@ def main(
     ri_func_rankic_on_cpu: bool = True,
     ri_admission_gate: bool = False,
     profile_timing: bool = True,
+    optimize_every: int = 2,
+    optimize_n_iter: int = 256,
     reward_per_step: float = REWARD_PER_STEP,
     ri_reg_l0: Optional[float] = None,
     ri_struct_topk: int = 5,
@@ -410,6 +418,8 @@ def main(
         ri_func_rankic_on_cpu=ri_func_rankic_on_cpu,
         ri_admission_gate=ri_admission_gate,
         profile_timing=profile_timing,
+        optimize_every=optimize_every,
+        optimize_n_iter=optimize_n_iter,
         ri_reg_l0=ri_reg_l0,
         ri_struct_topk=ri_struct_topk,
     )
@@ -454,6 +464,8 @@ def main(
                     "ri_func_rankic_on_cpu": ri_func_rankic_on_cpu,
                     "ri_admission_gate": ri_admission_gate,
                     "profile_timing": profile_timing,
+                    "optimize_every": optimize_every,
+                    "optimize_n_iter": optimize_n_iter,
                     "reward_per_step": reward_per_step,
                     "ri_reg_l0": ri_reg_l0,
                     "ri_struct_topk": ri_struct_topk,
@@ -582,6 +594,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ri_func_rankic_on_cpu", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ri_admission_gate", action="store_true")
     parser.add_argument("--profile_timing", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--optimize_every", type=int, default=2)
+    parser.add_argument("--optimize_n_iter", type=int, default=256)
     parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
     parser.add_argument("--ri_reg_l0", type=float, default=None)
     parser.add_argument("--ri_struct_topk", type=int, default=5)
@@ -628,6 +642,8 @@ if __name__ == '__main__':
             ri_func_rankic_on_cpu=args.ri_func_rankic_on_cpu,
             ri_admission_gate=args.ri_admission_gate,
             profile_timing=args.profile_timing,
+            optimize_every=args.optimize_every,
+            optimize_n_iter=args.optimize_n_iter,
             reward_per_step=args.reward_per_step,
             ri_reg_l0=args.ri_reg_l0,
             ri_struct_topk=args.ri_struct_topk,
