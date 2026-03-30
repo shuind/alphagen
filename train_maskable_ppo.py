@@ -35,6 +35,8 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "best_ic",
         "best_rankic",
         "mean_ic",
+        "mean_abs_ic",
+        "weighted_mean_ic",
         "mean_rankic",
         "test_rankic",
         "reward_total",
@@ -107,6 +109,7 @@ class CustomCallback(BaseCallback):
                  run_dir: Optional[str],
                  valid_calculator: AlphaCalculator,
                  test_calculator: AlphaCalculator,
+                 save_model_ckpt: bool = False,
                  name_prefix: str = 'rl_model',
                  timestamp: Optional[str] = None,
                  verbose: int = 0):
@@ -119,6 +122,7 @@ class CustomCallback(BaseCallback):
 
         self.valid_calculator = valid_calculator
         self.test_calculator = test_calculator
+        self.save_model_ckpt = bool(save_model_ckpt)
         self._last_rollout_ts: Optional[float] = None
         self._rollout_wall_total_sec: float = 0.0
         self._test_ensemble_total_sec: float = 0.0
@@ -155,8 +159,21 @@ class CustomCallback(BaseCallback):
         self.logger.record('test/rank_ic', rank_ic_test)
         rank_ic_test_value = float(rank_ic_test) if rank_ic_test is not None else math.nan
         pool_size = getattr(self.pool, "size", math.nan)
+        mean_abs_ic = math.nan
+        weighted_mean_ic = math.nan
         if isinstance(pool_size, (int, np.integer)) and pool_size > 0 and hasattr(self.pool, "single_ics"):
-            mean_ic = float(np.nanmean(self.pool.single_ics[:pool_size]))
+            single_ics = np.asarray(self.pool.single_ics[:pool_size], dtype=float)
+            mean_ic = float(np.nanmean(single_ics))
+            mean_abs_ic = float(np.nanmean(np.abs(single_ics)))
+            if hasattr(self.pool, "weights"):
+                weights = np.asarray(self.pool.weights[:pool_size], dtype=float)
+                valid_mask = ~np.isnan(single_ics) & ~np.isnan(weights)
+                if valid_mask.any():
+                    weights_valid = weights[valid_mask]
+                    single_ics_valid = single_ics[valid_mask]
+                    weight_l1 = float(np.sum(np.abs(weights_valid)))
+                    if weight_l1 > 0.0:
+                        weighted_mean_ic = float(np.dot(weights_valid, single_ics_valid) / weight_l1)
         else:
             mean_ic = math.nan
         profile = {}
@@ -183,6 +200,8 @@ class CustomCallback(BaseCallback):
                 "best_ic": getattr(self.pool, "best_ic_ret", math.nan),
                 "best_rankic": rank_ic_test_value,
                 "mean_ic": mean_ic,
+                "mean_abs_ic": mean_abs_ic,
+                "weighted_mean_ic": weighted_mean_ic,
                 "mean_rankic": math.nan,
                 "test_rankic": rank_ic_test_value,
                 "reward_total": getattr(self.pool, "last_reward_info", {}).get("reward_total", math.nan),
@@ -242,9 +261,10 @@ class CustomCallback(BaseCallback):
 
     def save_checkpoint(self):
         path = os.path.join(self.save_path, f'{self.num_timesteps}_steps')
-        self.model.save(path)   # type: ignore
-        if self.verbose > 1:
-            print(f'Saving model checkpoint to {path}')
+        if self.save_model_ckpt:
+            self.model.save(path)   # type: ignore
+            if self.verbose > 1:
+                print(f'Saving model checkpoint to {path}')
         with open(f'{path}_pool.json', 'w') as f:
             json.dump(self.pool.to_dict(), f)
 
@@ -333,6 +353,7 @@ def main(
     profile_timing: bool = True,
     optimize_every: int = 2,
     optimize_n_iter: int = 256,
+    save_model_ckpt: bool = False,
     reward_per_step: float = REWARD_PER_STEP,
     ri_reg_l0: Optional[float] = None,
     ri_struct_topk: int = 5,
@@ -381,18 +402,33 @@ def main(
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
 
+    train_start_time = '2014-01-01'
+    train_end_time = '2018-12-31'
+    valid_start_time = '2020-01-01'
+    valid_end_time = '2020-12-31'
+    test_start_time = '2021-01-01'
+    test_end_time = '2022-12-31'
+    stockdata_max_backtrack_days = 100
+    stockdata_max_future_days = 30
+
     # You can re-implement AlphaCalculator instead of using QLibStockDataCalculator.
     data_train = StockData(instrument=market,
-                           start_time='2010-01-01',
-                           end_time='2019-12-31',
+                           start_time=train_start_time,
+                           end_time=train_end_time,
+                           max_backtrack_days=stockdata_max_backtrack_days,
+                           max_future_days=stockdata_max_future_days,
                            device=device)
     data_valid = StockData(instrument=market,
-                           start_time='2020-01-01',
-                           end_time='2020-12-31',
+                           start_time=valid_start_time,
+                           end_time=valid_end_time,
+                           max_backtrack_days=stockdata_max_backtrack_days,
+                           max_future_days=stockdata_max_future_days,
                            device=device)
     data_test = StockData(instrument=market,
-                          start_time='2021-01-01',
-                          end_time='2022-12-31',
+                          start_time=test_start_time,
+                          end_time=test_end_time,
+                          max_backtrack_days=stockdata_max_backtrack_days,
+                          max_future_days=stockdata_max_future_days,
                           device=device)
     calculator_train = QLibStockDataCalculator(data_train, target)
     calculator_valid = QLibStockDataCalculator(data_valid, target)
@@ -466,6 +502,7 @@ def main(
                     "profile_timing": profile_timing,
                     "optimize_every": optimize_every,
                     "optimize_n_iter": optimize_n_iter,
+                    "save_model_ckpt": save_model_ckpt,
                     "reward_per_step": reward_per_step,
                     "ri_reg_l0": ri_reg_l0,
                     "ri_struct_topk": ri_struct_topk,
@@ -478,6 +515,23 @@ def main(
                     "tb_run_dir": tb_run_dir,
                     "run_root_dir": run_root_dir,
                     "provider_uri": resolved_provider_uri,
+                    "train_start_time": train_start_time,
+                    "train_end_time": train_end_time,
+                    "train_start_year": int(train_start_time[:4]),
+                    "train_end_year": int(train_end_time[:4]),
+                    "valid_start_time": valid_start_time,
+                    "valid_end_time": valid_end_time,
+                    "test_start_time": test_start_time,
+                    "test_end_time": test_end_time,
+                    "stockdata_max_backtrack_days": stockdata_max_backtrack_days,
+                    "stockdata_max_future_days": stockdata_max_future_days,
+                    "target_expression": "Ref($close,-20)/$close-1",
+                    "target_horizon_days": 20,
+                    "data_windows": {
+                        "train": {"start": train_start_time, "end": train_end_time},
+                        "valid": {"start": valid_start_time, "end": valid_end_time},
+                        "test": {"start": test_start_time, "end": test_end_time},
+                    },
                 },
                 f,
                 ensure_ascii=False,
@@ -493,6 +547,7 @@ def main(
         run_dir=run_root_dir,
         valid_calculator=calculator_valid,
         test_calculator=calculator_test,
+        save_model_ckpt=save_model_ckpt,
         name_prefix=name_prefix,
         timestamp=timestamp,
         verbose=verbose,
@@ -596,6 +651,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile_timing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--optimize_every", type=int, default=2)
     parser.add_argument("--optimize_n_iter", type=int, default=256)
+    parser.add_argument("--save_model_ckpt", action="store_true")
     parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
     parser.add_argument("--ri_reg_l0", type=float, default=None)
     parser.add_argument("--ri_struct_topk", type=int, default=5)
@@ -644,6 +700,7 @@ if __name__ == '__main__':
             profile_timing=args.profile_timing,
             optimize_every=args.optimize_every,
             optimize_n_iter=args.optimize_n_iter,
+            save_model_ckpt=args.save_model_ckpt,
             reward_per_step=args.reward_per_step,
             ri_reg_l0=args.ri_reg_l0,
             ri_struct_topk=args.ri_struct_topk,

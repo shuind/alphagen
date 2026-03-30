@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -32,6 +35,14 @@ class StepPool:
     path: Path
 
 
+@dataclass
+class YearCalculatorBuild:
+    year: int
+    elapsed_sec: float
+    status: str
+    error: str = ""
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -44,6 +55,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--provider-uri", type=str, default="")
     parser.add_argument("--market", type=str, default="csi300")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--step-mode", type=str, default="all", choices=["all", "list", "range"])
+    parser.add_argument(
+        "--step-list",
+        type=str,
+        default="",
+        help="Comma-separated steps used when step-mode=list, e.g. 2048,4096,8192.",
+    )
+    parser.add_argument("--step-min", type=int, default=None)
+    parser.add_argument("--step-max", type=int, default=None)
     parser.add_argument("--step-stride", type=int, default=1)
     parser.add_argument(
         "--years",
@@ -63,11 +83,14 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="If >0, keep only the nearest N post-train years.",
     )
-    parser.add_argument("--train-start-year", type=int, default=2010)
-    parser.add_argument("--train-end-year", type=int, default=2019)
+    parser.add_argument("--train-start-year", type=int, default=None)
+    parser.add_argument("--train-end-year", type=int, default=None)
     parser.add_argument("--max-backtrack-days", type=int, default=100)
     parser.add_argument("--max-future-days", type=int, default=30)
     parser.add_argument("--qlib-n-jobs", type=int, default=1)
+    parser.add_argument("--consistency-check", action="store_true")
+    parser.add_argument("--consistency-reference", type=str, default="")
+    parser.add_argument("--consistency-tolerance", type=float, default=1e-8)
     return parser.parse_args()
 
 
@@ -125,7 +148,20 @@ def _list_run_ids(runs_root: Path) -> List[str]:
     return sorted(run_ids)
 
 
-def _list_step_pools(ckpt_dir: Path, step_stride: int) -> List[StepPool]:
+def _parse_step_list_arg(step_list_arg: str) -> List[int]:
+    steps: List[int] = []
+    for part in step_list_arg.split(","):
+        t = part.strip()
+        if not t:
+            continue
+        try:
+            steps.append(int(t))
+        except ValueError:
+            continue
+    return sorted(list(set(steps)))
+
+
+def _list_step_pools(ckpt_dir: Path) -> List[StepPool]:
     step_pools: List[StepPool] = []
     for path in ckpt_dir.glob("*_steps_pool.json"):
         stem = path.name.split("_steps_pool.json")[0]
@@ -135,15 +171,45 @@ def _list_step_pools(ckpt_dir: Path, step_stride: int) -> List[StepPool]:
             continue
         step_pools.append(StepPool(step=step, path=path))
     step_pools.sort(key=lambda x: x.step)
+    return step_pools
+
+
+def _select_step_pools(
+    step_pools: List[StepPool],
+    step_mode: str,
+    step_list_arg: str,
+    step_min: Optional[int],
+    step_max: Optional[int],
+    step_stride: int,
+) -> List[StepPool]:
     if not step_pools:
         return []
 
-    stride = max(1, step_stride)
-    if stride == 1:
-        return step_pools
+    if step_mode == "list":
+        selected_steps = set(_parse_step_list_arg(step_list_arg))
+        if not selected_steps:
+            return []
+        return [sp for sp in step_pools if sp.step in selected_steps]
 
+    stride = max(1, step_stride)
+    if step_mode == "range":
+        lower = step_min if step_min is not None else step_pools[0].step
+        upper = step_max if step_max is not None else step_pools[-1].step
+        if lower > upper:
+            lower, upper = upper, lower
+        in_range = [sp for sp in step_pools if lower <= sp.step <= upper]
+        if not in_range:
+            return []
+        selected = [sp for idx, sp in enumerate(in_range) if idx % stride == 0]
+        if selected and selected[-1].step != in_range[-1].step:
+            selected.append(in_range[-1])
+        return selected
+
+    # step_mode == all
+    if stride == 1:
+        return list(step_pools)
     selected = [sp for idx, sp in enumerate(step_pools) if idx % stride == 0]
-    if selected[-1].step != step_pools[-1].step:
+    if selected and selected[-1].step != step_pools[-1].step:
         selected.append(step_pools[-1])
     return selected
 
@@ -217,19 +283,33 @@ def _resolve_device(device_arg: str) -> torch.device:
 
 
 def _resolve_provider_uri(cli_provider: str, run_path: Path) -> str:
-    if cli_provider:
-        return cli_provider
-    env_provider = Path().absolute()
-    _ = env_provider  # keep lint quiet for environments without os import in static analyzers
-    import os
+    def _non_empty(value: str | None) -> str:
+        return (value or "").strip()
 
-    provider = os.environ.get("QLIB_PROVIDER_URI", "")
-    if provider:
-        return provider
+    candidates: List[str] = []
+    if _non_empty(cli_provider):
+        candidates.append(_non_empty(cli_provider))
+
+    for env_name in ["QLIB_PROVIDER_URI", "PROVIDER_URI"]:
+        env_val = _non_empty(os.environ.get(env_name, ""))
+        if env_val:
+            candidates.append(env_val)
+
     meta = _read_json(run_path / "run_meta.json")
-    if isinstance(meta.get("provider_uri"), str) and meta["provider_uri"]:
-        return meta["provider_uri"]
-    return "/kaggle/input/baostock/cn_data_baostock_fwdadj"
+    meta_provider = meta.get("provider_uri")
+    if isinstance(meta_provider, str) and _non_empty(meta_provider):
+        candidates.append(_non_empty(meta_provider))
+
+    # Legacy fallback for Kaggle environments.
+    candidates.append("/kaggle/input/baostock/cn_data_baostock_fwdadj")
+
+    for candidate in candidates:
+        p = Path(candidate)
+        if p.exists():
+            return candidate
+
+    # Return first candidate for downstream error context if none exists.
+    return candidates[0]
 
 
 def _init_qlib(provider_uri: str, n_jobs: int) -> None:
@@ -319,15 +399,17 @@ def _build_year_calculators(
     device: torch.device,
     max_backtrack_days: int,
     max_future_days: int,
-) -> Dict[int, QLibStockDataCalculator]:
+) -> Tuple[Dict[int, QLibStockDataCalculator], List[YearCalculatorBuild]]:
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
     calculators: Dict[int, QLibStockDataCalculator] = {}
+    build_stats: List[YearCalculatorBuild] = []
     years = list(eval_years)
     total = len(years)
     for idx, year in enumerate(years, start=1):
         start_time = f"{year}-01-01"
         end_time = f"{year}-12-31"
+        t0 = time.perf_counter()
         try:
             print(f"[year] building calculator {idx}/{total}: {year}")
             stock_data = StockData(
@@ -339,6 +421,14 @@ def _build_year_calculators(
                 device=device,
             )
             if stock_data.n_days <= 0:
+                build_stats.append(
+                    YearCalculatorBuild(
+                        year=year,
+                        elapsed_sec=max(0.0, time.perf_counter() - t0),
+                        status="skip",
+                        error="n_days<=0",
+                    )
+                )
                 continue
             calculator = QLibStockDataCalculator(stock_data, target)
             with torch.no_grad():
@@ -351,11 +441,180 @@ def _build_year_calculators(
                 n_valid_days = int((~daily_rankic.isnan()).sum().item())
             if n_valid_days <= 0 or valid_ratio <= 0:
                 print(f"[year] skip {year}: no valid daily samples")
+                build_stats.append(
+                    YearCalculatorBuild(
+                        year=year,
+                        elapsed_sec=max(0.0, time.perf_counter() - t0),
+                        status="skip",
+                        error="no_valid_daily_samples",
+                    )
+                )
                 continue
             calculators[year] = calculator
+            build_stats.append(
+                YearCalculatorBuild(
+                    year=year,
+                    elapsed_sec=max(0.0, time.perf_counter() - t0),
+                    status="ok",
+                    error="",
+                )
+            )
         except Exception as exc:
             print(f"[warn] skip year={year}: {exc}")
-    return calculators
+            build_stats.append(
+                YearCalculatorBuild(
+                    year=year,
+                    elapsed_sec=max(0.0, time.perf_counter() - t0),
+                    status="error",
+                    error=str(exc),
+                )
+            )
+    return calculators, build_stats
+
+
+def _extract_year_from_value(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, (int, np.integer)):
+        if 1900 <= int(value) <= 2200:
+            return int(value)
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.isdigit() and len(text) == 4:
+            year = int(text)
+            if 1900 <= year <= 2200:
+                return year
+            return None
+        try:
+            return int(pd.Timestamp(text).year)
+        except Exception:
+            return None
+    return None
+
+
+def _resolve_train_window_years(
+    args: argparse.Namespace,
+    run_meta: Dict[str, Any],
+) -> Tuple[int, int, str, List[str]]:
+    warnings: List[str] = []
+    default_start, default_end = 2010, 2019
+
+    if args.train_start_year is not None and args.train_end_year is not None:
+        return int(args.train_start_year), int(args.train_end_year), "cli", warnings
+
+    data_windows = run_meta.get("data_windows", {}) if isinstance(run_meta.get("data_windows", {}), dict) else {}
+    train_window = data_windows.get("train", {}) if isinstance(data_windows.get("train", {}), dict) else {}
+    alt_train_window = run_meta.get("train_window", {}) if isinstance(run_meta.get("train_window", {}), dict) else {}
+
+    meta_start = (
+        _extract_year_from_value(run_meta.get("train_start_year"))
+        or _extract_year_from_value(run_meta.get("train_start_time"))
+        or _extract_year_from_value(train_window.get("start"))
+        or _extract_year_from_value(train_window.get("start_time"))
+        or _extract_year_from_value(alt_train_window.get("start"))
+        or _extract_year_from_value(alt_train_window.get("start_time"))
+    )
+    meta_end = (
+        _extract_year_from_value(run_meta.get("train_end_year"))
+        or _extract_year_from_value(run_meta.get("train_end_time"))
+        or _extract_year_from_value(train_window.get("end"))
+        or _extract_year_from_value(train_window.get("end_time"))
+        or _extract_year_from_value(alt_train_window.get("end"))
+        or _extract_year_from_value(alt_train_window.get("end_time"))
+    )
+
+    cli_start = int(args.train_start_year) if args.train_start_year is not None else None
+    cli_end = int(args.train_end_year) if args.train_end_year is not None else None
+
+    if cli_start is not None and cli_end is None:
+        start = cli_start
+        end = meta_end if meta_end is not None else default_end
+        source = "mixed_cli+meta" if meta_end is not None else "mixed_cli+default"
+        if meta_end is None:
+            warnings.append(f"train_end_year missing in run_meta; fallback to default {default_end}")
+        return start, end, source, warnings
+
+    if cli_end is not None and cli_start is None:
+        end = cli_end
+        start = meta_start if meta_start is not None else default_start
+        source = "mixed_cli+meta" if meta_start is not None else "mixed_cli+default"
+        if meta_start is None:
+            warnings.append(f"train_start_year missing in run_meta; fallback to default {default_start}")
+        return start, end, source, warnings
+
+    if meta_start is not None and meta_end is not None:
+        return meta_start, meta_end, "run_meta", warnings
+
+    if meta_start is None:
+        warnings.append(f"train_start_year missing in run_meta; fallback to default {default_start}")
+    if meta_end is None:
+        warnings.append(f"train_end_year missing in run_meta; fallback to default {default_end}")
+    return default_start, default_end, "default", warnings
+
+
+def _resolve_git_revision() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            cwd=str(PROJECT_ROOT),
+        )
+        return out.strip()
+    except Exception:
+        return "unknown"
+
+
+def _extract_consistency_keys(summary: Dict[str, Any]) -> Dict[str, Any]:
+    best_metrics = summary.get("best_metrics", {}) if isinstance(summary.get("best_metrics", {}), dict) else {}
+    return {
+        "best_step_by_post_rankic": summary.get("best_step_by_post_rankic"),
+        "post_mean_rankic": best_metrics.get("post_mean_rankic"),
+        "post_var_rankic": best_metrics.get("post_var_rankic"),
+        "generalization_gap": best_metrics.get("generalization_gap"),
+        "stability_score": best_metrics.get("stability_score"),
+    }
+
+
+def _compare_consistency(
+    reference: Dict[str, Any],
+    current: Dict[str, Any],
+    tolerance: float,
+) -> Dict[str, Any]:
+    ref_keys = _extract_consistency_keys(reference)
+    cur_keys = _extract_consistency_keys(current)
+    diffs: List[Dict[str, Any]] = []
+
+    for key, ref_value in ref_keys.items():
+        cur_value = cur_keys.get(key)
+        if isinstance(ref_value, (int, np.integer)) and isinstance(cur_value, (int, np.integer)):
+            if int(ref_value) != int(cur_value):
+                diffs.append({"key": key, "reference": int(ref_value), "current": int(cur_value), "delta": None})
+            continue
+
+        try:
+            ref_num = float(ref_value)
+            cur_num = float(cur_value)
+            if math.isnan(ref_num) and math.isnan(cur_num):
+                continue
+            delta = abs(cur_num - ref_num)
+            if math.isnan(delta) or delta > tolerance:
+                diffs.append({"key": key, "reference": ref_num, "current": cur_num, "delta": delta})
+            continue
+        except Exception:
+            if ref_value != cur_value:
+                diffs.append({"key": key, "reference": ref_value, "current": cur_value, "delta": None})
+
+    return {
+        "passed": len(diffs) == 0,
+        "differences": diffs,
+        "tolerance": tolerance,
+        "reference_keys": ref_keys,
+        "current_keys": cur_keys,
+    }
 
 
 def _evaluate_run(
@@ -369,14 +628,22 @@ def _evaluate_run(
     ckpt_dir = _resolve_ckpt_dir(runs_root, run_path, run_id)
     if ckpt_dir is None:
         raise FileNotFoundError(f"checkpoint dir not found for run: {run_id}")
+    run_meta = _read_json(run_path / "run_meta.json")
 
     provider_uri = _resolve_provider_uri(args.provider_uri, run_path)
     _init_qlib(provider_uri, args.qlib_n_jobs)
     device = _resolve_device(args.device)
+    train_start_year, train_end_year, train_window_source, window_warnings = _resolve_train_window_years(args, run_meta)
 
+    for warning in window_warnings:
+        print(f"[warn] {warning}")
+    print(f"[train-window] source={train_window_source} start={train_start_year} end={train_end_year}")
+
+    run_started_at = datetime.now()
+    run_eval_t0 = time.perf_counter()
     pre_years, post_years, eval_years = _collect_eval_years(
-        train_start_year=args.train_start_year,
-        train_end_year=args.train_end_year,
+        train_start_year=train_start_year,
+        train_end_year=train_end_year,
         max_backtrack_days=args.max_backtrack_days,
         max_future_days=args.max_future_days,
     )
@@ -397,64 +664,146 @@ def _evaluate_run(
         f"(total={len(eval_years)})"
     )
 
-    calculators = _build_year_calculators(
+    calc_build_t0 = time.perf_counter()
+    calculators, year_build_stats = _build_year_calculators(
         market=args.market,
         eval_years=eval_years,
         device=device,
         max_backtrack_days=args.max_backtrack_days,
         max_future_days=args.max_future_days,
     )
+    calc_build_total_sec = max(0.0, time.perf_counter() - calc_build_t0)
+
     if not calculators:
         raise RuntimeError("no yearly calculators built successfully")
     effective_years = sorted(list(calculators.keys()))
-    effective_pre_years = [y for y in effective_years if y < args.train_start_year]
-    effective_post_years = [y for y in effective_years if y > args.train_end_year]
+    effective_pre_years = [y for y in effective_years if y < train_start_year]
+    effective_post_years = [y for y in effective_years if y > train_end_year]
 
-    step_pools = _list_step_pools(ckpt_dir, args.step_stride)
+    all_step_pools = _list_step_pools(ckpt_dir)
+    step_pools = _select_step_pools(
+        all_step_pools,
+        step_mode=args.step_mode,
+        step_list_arg=args.step_list,
+        step_min=args.step_min,
+        step_max=args.step_max,
+        step_stride=args.step_stride,
+    )
     if not step_pools:
-        raise FileNotFoundError(f"no *_steps_pool.json under {ckpt_dir}")
+        raise FileNotFoundError(
+            f"no matching *_steps_pool.json under {ckpt_dir} for step selector "
+            f"(mode={args.step_mode}, list='{args.step_list}', min={args.step_min}, max={args.step_max}, stride={args.step_stride})"
+        )
 
     year_rows: List[Dict] = []
     stability_rows: List[Dict] = []
+    step_timing_rows: List[Dict[str, Any]] = []
+    step_year_failures: List[Dict[str, Any]] = []
+    consistency_reference_payload: Dict[str, Any] = {}
 
     for idx, step_pool in enumerate(step_pools, start=1):
+        step_t0 = time.perf_counter()
         print(f"[step] evaluating checkpoint {idx}/{len(step_pools)}: step={step_pool.step}")
-        exprs, weights = load_alpha_pool_by_path(str(step_pool.path))
+        try:
+            exprs, weights = load_alpha_pool_by_path(str(step_pool.path))
+        except Exception as exc:
+            step_year_failures.append(
+                {
+                    "step": step_pool.step,
+                    "year": None,
+                    "stage": "load_pool",
+                    "error": str(exc),
+                }
+            )
+            step_timing_rows.append(
+                {
+                    "step": step_pool.step,
+                    "elapsed_sec": max(0.0, time.perf_counter() - step_t0),
+                    "evaluated_year_count": 0,
+                    "failed_year_count": 1,
+                }
+            )
+            print(f"[warn] step={step_pool.step} load failed: {exc}")
+            continue
         if len(exprs) == 0:
+            step_timing_rows.append(
+                {
+                    "step": step_pool.step,
+                    "elapsed_sec": max(0.0, time.perf_counter() - step_t0),
+                    "evaluated_year_count": 0,
+                    "failed_year_count": 0,
+                }
+            )
             continue
         if len(exprs) != len(weights):
             m = min(len(exprs), len(weights))
             exprs, weights = exprs[:m], weights[:m]
 
         this_step_rows: List[Dict] = []
+        this_step_failures = 0
         for year, calculator in calculators.items():
-            metrics = _eval_pool_on_calculator(calculator, exprs, weights)
-            period = "pre" if year < args.train_start_year else "post"
-            row = {
-                "run_id": run_id,
+            year_t0 = time.perf_counter()
+            try:
+                metrics = _eval_pool_on_calculator(calculator, exprs, weights)
+                period = "pre" if year < train_start_year else "post"
+                row = {
+                    "run_id": run_id,
+                    "step": step_pool.step,
+                    "pool_json": str(step_pool.path),
+                    "pool_size": len(exprs),
+                    "year": year,
+                    "period": period,
+                    "eval_sec": max(0.0, time.perf_counter() - year_t0),
+                    **metrics,
+                }
+                year_rows.append(row)
+                this_step_rows.append(row)
+            except Exception as exc:
+                this_step_failures += 1
+                fail_payload = {
+                    "step": step_pool.step,
+                    "year": year,
+                    "stage": "eval_year",
+                    "error": str(exc),
+                    "elapsed_sec": max(0.0, time.perf_counter() - year_t0),
+                }
+                step_year_failures.append(fail_payload)
+                print(f"[warn] step={step_pool.step} year={year} eval failed: {exc}")
+
+        step_elapsed = max(0.0, time.perf_counter() - step_t0)
+        step_timing_rows.append(
+            {
                 "step": step_pool.step,
-                "pool_json": str(step_pool.path),
-                "pool_size": len(exprs),
-                "year": year,
-                "period": period,
-                **metrics,
+                "elapsed_sec": step_elapsed,
+                "evaluated_year_count": len(this_step_rows),
+                "failed_year_count": this_step_failures,
             }
-            year_rows.append(row)
-            this_step_rows.append(row)
+        )
+        print(
+            f"[step] done step={step_pool.step} "
+            f"evaluated_years={len(this_step_rows)} failed_years={this_step_failures} "
+            f"elapsed={step_elapsed:.2f}s"
+        )
+        if not this_step_rows:
+            continue
 
         step_df = pd.DataFrame(this_step_rows)
         pre_df = step_df[step_df["period"] == "pre"]
         post_df = step_df[step_df["period"] == "post"]
+        all_df = step_df
 
         pre_mean_ic, pre_std_ic, pre_var_ic, pre_count_ic = _agg(pre_df["year_ic"])
         pre_mean_rankic, pre_std_rankic, pre_var_rankic, pre_count_rankic = _agg(pre_df["year_rankic"])
         post_mean_ic, post_std_ic, post_var_ic, post_count_ic = _agg(post_df["year_ic"])
         post_mean_rankic, post_std_rankic, post_var_rankic, post_count_rankic = _agg(post_df["year_rankic"])
+        all_mean_ic, all_std_ic, all_var_ic, all_count_ic = _agg(all_df["year_ic"])
+        all_mean_rankic, all_std_rankic, all_var_rankic, all_count_rankic = _agg(all_df["year_rankic"])
 
         generalization_gap = float("nan")
         if not np.isnan(pre_mean_rankic) and not np.isnan(post_mean_rankic):
             generalization_gap = post_mean_rankic - pre_mean_rankic
-        stability_score = -post_var_rankic if not np.isnan(post_var_rankic) else float("nan")
+        # Stability uses standard deviation (not variance): lower std -> higher score.
+        stability_score = -post_std_rankic if not np.isnan(post_std_rankic) else float("nan")
 
         stability_rows.append(
             {
@@ -476,12 +825,41 @@ def _evaluate_run(
                 "post_mean_rankic": post_mean_rankic,
                 "post_std_rankic": post_std_rankic,
                 "post_var_rankic": post_var_rankic,
+                # v2 naming aliases (clearer ordering): <period>_<metric>_<agg>
+                "pre_ic_mean": pre_mean_ic,
+                "pre_ic_std": pre_std_ic,
+                "pre_ic_var": pre_var_ic,
+                "pre_rankic_mean": pre_mean_rankic,
+                "pre_rankic_std": pre_std_rankic,
+                "pre_rankic_var": pre_var_rankic,
+                "post_ic_mean": post_mean_ic,
+                "post_ic_std": post_std_ic,
+                "post_ic_var": post_var_ic,
+                "post_rankic_mean": post_mean_rankic,
+                "post_rankic_std": post_std_rankic,
+                "post_rankic_var": post_var_rankic,
+                "all_mean_ic": all_mean_ic,
+                "all_std_ic": all_std_ic,
+                "all_var_ic": all_var_ic,
+                "all_mean_rankic": all_mean_rankic,
+                "all_std_rankic": all_std_rankic,
+                "all_var_rankic": all_var_rankic,
+                "all_ic_mean": all_mean_ic,
+                "all_ic_std": all_std_ic,
+                "all_ic_var": all_var_ic,
+                "all_rankic_mean": all_mean_rankic,
+                "all_rankic_std": all_std_rankic,
+                "all_rankic_var": all_var_rankic,
                 "generalization_gap": generalization_gap,
                 "stability_score": stability_score,
                 "pre_valid_count_ic": pre_count_ic,
                 "pre_valid_count_rankic": pre_count_rankic,
                 "post_valid_count_ic": post_count_ic,
                 "post_valid_count_rankic": post_count_rankic,
+                "all_valid_count_ic": all_count_ic,
+                "all_valid_count_rankic": all_count_rankic,
+                "step_eval_sec": step_elapsed,
+                "step_failed_year_count": this_step_failures,
             }
         )
 
@@ -496,9 +874,19 @@ def _evaluate_run(
     year_csv = output_dir / "checkpoint_year_metrics.csv"
     stability_csv = output_dir / "checkpoint_stability.csv"
     summary_json = output_dir / "generalization_summary.json"
+    manifest_json = output_dir / "eval_manifest.json"
+    diff_report_json = output_dir / "diff_report.json"
 
     year_df.to_csv(year_csv, index=False, encoding="utf-8")
     stability_df.to_csv(stability_csv, index=False, encoding="utf-8")
+
+    if args.consistency_check:
+        reference_path = Path(args.consistency_reference).resolve() if args.consistency_reference else summary_json
+        if not reference_path.is_file():
+            raise RuntimeError(f"consistency reference not found: {reference_path}")
+        consistency_reference_payload = _read_json(reference_path)
+    else:
+        reference_path = Path()
 
     valid_post = stability_df.dropna(subset=["post_mean_rankic"])
     if not valid_post.empty:
@@ -513,8 +901,10 @@ def _evaluate_run(
         "run_path": str(run_path),
         "provider_uri": provider_uri,
         "market": args.market,
-        "train_start_year": args.train_start_year,
-        "train_end_year": args.train_end_year,
+        "train_start_year": train_start_year,
+        "train_end_year": train_end_year,
+        "train_window_source": train_window_source,
+        "train_window_warnings": window_warnings,
         "pre_years": effective_pre_years,
         "post_years": effective_post_years,
         "evaluated_years": effective_years,
@@ -525,6 +915,12 @@ def _evaluate_run(
             {
                 "post_mean_rankic": _safe_float(float(best_row["post_mean_rankic"])),
                 "post_var_rankic": _safe_float(float(best_row["post_var_rankic"])),
+                "post_rankic_mean": _safe_float(float(best_row["post_rankic_mean"])),
+                "post_rankic_var": _safe_float(float(best_row["post_rankic_var"])),
+                "all_rankic_mean": _safe_float(float(best_row["all_rankic_mean"])),
+                "all_rankic_std": _safe_float(float(best_row["all_rankic_std"])),
+                "all_ic_mean": _safe_float(float(best_row["all_ic_mean"])),
+                "all_ic_std": _safe_float(float(best_row["all_ic_std"])),
                 "generalization_gap": _safe_float(float(best_row["generalization_gap"])),
                 "stability_score": _safe_float(float(best_row["stability_score"])),
             }
@@ -534,9 +930,72 @@ def _evaluate_run(
         "artifacts": {
             "checkpoint_year_metrics_csv": str(year_csv),
             "checkpoint_stability_csv": str(stability_csv),
+            "eval_manifest_json": str(manifest_json),
         },
     }
-    summary_json.write_text(json.dumps(gen_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    run_duration_sec = max(0.0, time.perf_counter() - run_eval_t0)
+    year_build_failures = [
+        {
+            "year": item.year,
+            "status": item.status,
+            "error": item.error,
+            "elapsed_sec": item.elapsed_sec,
+        }
+        for item in year_build_stats
+        if item.status != "ok"
+    ]
+    manifest_payload: Dict[str, Any] = {
+        "run_id": run_id,
+        "run_path": str(run_path),
+        "ckpt_dir": str(ckpt_dir),
+        "script": str(Path(__file__).resolve()),
+        "script_git_revision": _resolve_git_revision(),
+        "started_at": run_started_at.isoformat(timespec="seconds"),
+        "finished_at": datetime.now().isoformat(timespec="seconds"),
+        "duration_sec": run_duration_sec,
+        "provider_uri": provider_uri,
+        "market": args.market,
+        "device": str(device),
+        "qlib_n_jobs": args.qlib_n_jobs,
+        "step_stride": args.step_stride,
+        "step_mode": args.step_mode,
+        "step_list": _parse_step_list_arg(args.step_list),
+        "step_min": args.step_min,
+        "step_max": args.step_max,
+        "years_arg": args.years,
+        "pre_years_limit": args.pre_years_limit,
+        "post_years_limit": args.post_years_limit,
+        "train_window": {
+            "start_year": train_start_year,
+            "end_year": train_end_year,
+            "source": train_window_source,
+            "warnings": window_warnings,
+        },
+        "evaluable_years_requested": eval_years,
+        "evaluable_years_effective": effective_years,
+        "effective_pre_years": effective_pre_years,
+        "effective_post_years": effective_post_years,
+        "checkpoint_total": len(step_pools),
+        "checkpoint_evaluated": len(stability_df),
+        "timing": {
+            "build_year_calculators_sec": calc_build_total_sec,
+            "step_eval_total_sec": float(sum(item["elapsed_sec"] for item in step_timing_rows)),
+            "step_eval_rows": step_timing_rows,
+            "year_build_rows": [
+                {
+                    "year": item.year,
+                    "elapsed_sec": item.elapsed_sec,
+                    "status": item.status,
+                    "error": item.error,
+                }
+                for item in year_build_stats
+            ],
+        },
+        "failures": {
+            "year_build_failures": year_build_failures,
+            "step_year_failures": step_year_failures,
+        },
+    }
 
     summary_metrics_path = run_path / "summary_metrics.json"
     summary_metrics = _read_json(summary_metrics_path)
@@ -545,10 +1004,44 @@ def _evaluate_run(
         summary_metrics["gen_post_rankic_mean_best"] = _safe_float(float(best_row["post_mean_rankic"]))
         summary_metrics["gen_post_rankic_var_best"] = _safe_float(float(best_row["post_var_rankic"]))
         summary_metrics["gen_pre_post_gap_best"] = _safe_float(float(best_row["generalization_gap"]))
+        summary_metrics["gen_all_rankic_mean_best"] = _safe_float(float(best_row["all_rankic_mean"]))
+        summary_metrics["gen_all_rankic_std_best"] = _safe_float(float(best_row["all_rankic_std"]))
+        summary_metrics["gen_all_ic_mean_best"] = _safe_float(float(best_row["all_ic_mean"]))
+        summary_metrics["gen_all_ic_std_best"] = _safe_float(float(best_row["all_ic_std"]))
+    summary_metrics["gen_train_start_year"] = train_start_year
+    summary_metrics["gen_train_end_year"] = train_end_year
+    summary_metrics["gen_train_window_source"] = train_window_source
     summary_metrics_path.write_text(
         json.dumps(summary_metrics, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+    consistency_result: Dict[str, Any] = {
+        "enabled": bool(args.consistency_check),
+        "reference_path": str(reference_path) if args.consistency_check else "",
+        "passed": None,
+        "tolerance": args.consistency_tolerance,
+        "difference_count": 0,
+    }
+    if args.consistency_check:
+        diff_payload = _compare_consistency(
+            reference=consistency_reference_payload,
+            current=gen_summary,
+            tolerance=max(0.0, args.consistency_tolerance),
+        )
+        diff_report_json.write_text(json.dumps(diff_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        consistency_result["passed"] = bool(diff_payload["passed"])
+        consistency_result["difference_count"] = len(diff_payload.get("differences", []))
+        consistency_result["diff_report_path"] = str(diff_report_json)
+        if not diff_payload["passed"]:
+            print(f"[warn] consistency check failed, see: {diff_report_json}")
+    manifest_payload["consistency_check"] = consistency_result
+
+    manifest_json.write_text(json.dumps(manifest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_json.write_text(json.dumps(gen_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if args.consistency_check and consistency_result.get("passed") is False:
+        raise RuntimeError(f"consistency check failed for run={run_id}, diff={diff_report_json}")
 
     return {
         "run_id": run_id,
@@ -557,6 +1050,7 @@ def _evaluate_run(
         "year_csv": str(year_csv),
         "stability_csv": str(stability_csv),
         "summary_json": str(summary_json),
+        "manifest_json": str(manifest_json),
         "summary_metrics_path": str(summary_metrics_path),
         "best_step_by_post_rankic": best_step,
     }

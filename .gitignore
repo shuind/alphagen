@@ -15,3 +15,27 @@ outputs/
 *.zip
 download_kaggle_output.ps1
 kaggle/
+kaggle_kernel/
+platform_v2/
+
+# Platform build/runtime artifacts
+platform_runtime/
+platform_v2/runtime/
+platform_v2/frontend/node_modules/
+platform_v2/frontend/dist/
+platform_v2/backend/**/__pycache__/
+platform_v2/**/__pycache__/
+
+# Local experiment/runtime artifacts
+ckpt_smoke_v2/
+runs_smoke_v2/
+tb_smoke_v2/
+context_*_smoke/
+context_runs_smoke*/
+embedding_outputs/
+runs/
+checkpoints/
+tb_log/
+context_outputs/
+*.pt
+*.pth
