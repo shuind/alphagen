@@ -45,6 +45,8 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "RI_struct",
         "RI_reg",
         "reward_lambda_t",
+        "ri_func_backend",
+        "ri_struct_backend",
         "optimize_executed",
         "optimize_every",
         "optimize_n_iter",
@@ -52,6 +54,22 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "cluster_count",
         "cluster_mean_re",
         "cluster_positive_re_rate",
+        "token_cluster_id",
+        "token_cluster_count",
+        "token_cluster_mean_re",
+        "token_cluster_positive_re_rate",
+        "ast_cluster_id",
+        "ast_cluster_count",
+        "ast_cluster_mean_re",
+        "ast_cluster_positive_re_rate",
+        "ast_cluster_similarity",
+        "ast_cluster_is_new",
+        "corr_cluster_id",
+        "corr_cluster_count",
+        "corr_cluster_mean_re",
+        "corr_cluster_positive_re_rate",
+        "corr_cluster_similarity",
+        "corr_cluster_is_new",
         "ri_func_eval_ms",
         "ri_func_stack_ms",
         "ri_func_lstsq_ms",
@@ -210,6 +228,8 @@ class CustomCallback(BaseCallback):
                 "RI_struct": getattr(self.pool, "last_reward_info", {}).get("ri_struct", math.nan),
                 "RI_reg": getattr(self.pool, "last_reward_info", {}).get("ri_reg", math.nan),
                 "reward_lambda_t": getattr(self.pool, "last_reward_info", {}).get("reward_lambda_t", math.nan),
+                "ri_func_backend": getattr(self.pool, "last_reward_info", {}).get("ri_func_backend", math.nan),
+                "ri_struct_backend": getattr(self.pool, "last_reward_info", {}).get("ri_struct_backend", math.nan),
                 "optimize_executed": getattr(self.pool, "last_reward_info", {}).get("optimize_executed", math.nan),
                 "optimize_every": getattr(self.pool, "last_reward_info", {}).get("optimize_every", math.nan),
                 "optimize_n_iter": getattr(self.pool, "last_reward_info", {}).get("optimize_n_iter", math.nan),
@@ -217,6 +237,22 @@ class CustomCallback(BaseCallback):
                 "cluster_count": getattr(self.pool, "last_reward_info", {}).get("cluster_count", math.nan),
                 "cluster_mean_re": getattr(self.pool, "last_reward_info", {}).get("cluster_mean_re", math.nan),
                 "cluster_positive_re_rate": getattr(self.pool, "last_reward_info", {}).get("cluster_positive_re_rate", math.nan),
+                "token_cluster_id": getattr(self.pool, "last_reward_info", {}).get("token_cluster_id", math.nan),
+                "token_cluster_count": getattr(self.pool, "last_reward_info", {}).get("token_cluster_count", math.nan),
+                "token_cluster_mean_re": getattr(self.pool, "last_reward_info", {}).get("token_cluster_mean_re", math.nan),
+                "token_cluster_positive_re_rate": getattr(self.pool, "last_reward_info", {}).get("token_cluster_positive_re_rate", math.nan),
+                "ast_cluster_id": getattr(self.pool, "last_reward_info", {}).get("ast_cluster_id", math.nan),
+                "ast_cluster_count": getattr(self.pool, "last_reward_info", {}).get("ast_cluster_count", math.nan),
+                "ast_cluster_mean_re": getattr(self.pool, "last_reward_info", {}).get("ast_cluster_mean_re", math.nan),
+                "ast_cluster_positive_re_rate": getattr(self.pool, "last_reward_info", {}).get("ast_cluster_positive_re_rate", math.nan),
+                "ast_cluster_similarity": getattr(self.pool, "last_reward_info", {}).get("ast_cluster_similarity", math.nan),
+                "ast_cluster_is_new": getattr(self.pool, "last_reward_info", {}).get("ast_cluster_is_new", math.nan),
+                "corr_cluster_id": getattr(self.pool, "last_reward_info", {}).get("corr_cluster_id", math.nan),
+                "corr_cluster_count": getattr(self.pool, "last_reward_info", {}).get("corr_cluster_count", math.nan),
+                "corr_cluster_mean_re": getattr(self.pool, "last_reward_info", {}).get("corr_cluster_mean_re", math.nan),
+                "corr_cluster_positive_re_rate": getattr(self.pool, "last_reward_info", {}).get("corr_cluster_positive_re_rate", math.nan),
+                "corr_cluster_similarity": getattr(self.pool, "last_reward_info", {}).get("corr_cluster_similarity", math.nan),
+                "corr_cluster_is_new": getattr(self.pool, "last_reward_info", {}).get("corr_cluster_is_new", math.nan),
                 "ri_func_eval_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_eval_ms", math.nan),
                 "ri_func_stack_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_stack_ms", math.nan),
                 "ri_func_lstsq_ms": getattr(self.pool, "last_reward_info", {}).get("ri_func_lstsq_ms", math.nan),
@@ -350,6 +386,12 @@ def main(
     ri_func_sample_size: int = 128,
     ri_func_rankic_on_cpu: bool = True,
     ri_admission_gate: bool = False,
+    ri_func_backend: str = "auto",
+    ri_struct_backend: str = "token_bigram",
+    ri_corr_threshold: float = 0.8,
+    ri_ast_similarity_threshold: float = 0.9,
+    ri_corr_value_bonus: float = 0.1,
+    ri_corr_underexplore_power: float = 1.0,
     profile_timing: bool = True,
     optimize_every: int = 2,
     optimize_n_iter: int = 256,
@@ -402,8 +444,8 @@ def main(
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
 
-    train_start_time = '2010-01-01'
-    train_end_time = '2019-12-31'
+    train_start_time = '2014-01-01'
+    train_end_time = '2018-12-31'
     valid_start_time = '2020-01-01'
     valid_end_time = '2020-12-31'
     test_start_time = '2021-01-01'
@@ -453,6 +495,12 @@ def main(
         ri_func_sample_size=ri_func_sample_size,
         ri_func_rankic_on_cpu=ri_func_rankic_on_cpu,
         ri_admission_gate=ri_admission_gate,
+        ri_func_backend=ri_func_backend,
+        ri_struct_backend=ri_struct_backend,
+        ri_corr_threshold=ri_corr_threshold,
+        ri_ast_similarity_threshold=ri_ast_similarity_threshold,
+        ri_corr_value_bonus=ri_corr_value_bonus,
+        ri_corr_underexplore_power=ri_corr_underexplore_power,
         profile_timing=profile_timing,
         optimize_every=optimize_every,
         optimize_n_iter=optimize_n_iter,
@@ -499,6 +547,12 @@ def main(
                     "ri_func_sample_size": ri_func_sample_size,
                     "ri_func_rankic_on_cpu": ri_func_rankic_on_cpu,
                     "ri_admission_gate": ri_admission_gate,
+                    "ri_func_backend": ri_func_backend,
+                    "ri_struct_backend": ri_struct_backend,
+                    "ri_corr_threshold": ri_corr_threshold,
+                    "ri_ast_similarity_threshold": ri_ast_similarity_threshold,
+                    "ri_corr_value_bonus": ri_corr_value_bonus,
+                    "ri_corr_underexplore_power": ri_corr_underexplore_power,
                     "profile_timing": profile_timing,
                     "optimize_every": optimize_every,
                     "optimize_n_iter": optimize_n_iter,
@@ -648,6 +702,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ri_func_sample_size", type=int, default=128)
     parser.add_argument("--ri_func_rankic_on_cpu", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ri_admission_gate", action="store_true")
+    parser.add_argument("--ri_func_backend", type=str, default="auto",
+                        choices=["auto", "mutual_ic", "residual", "corr_cluster"])
+    parser.add_argument("--ri_struct_backend", type=str, default="token_bigram",
+                        choices=["token_bigram", "ast_cluster"])
+    parser.add_argument("--ri_corr_threshold", type=float, default=0.8)
+    parser.add_argument("--ri_ast_similarity_threshold", type=float, default=0.9)
+    parser.add_argument("--ri_corr_value_bonus", type=float, default=0.1)
+    parser.add_argument("--ri_corr_underexplore_power", type=float, default=1.0)
     parser.add_argument("--profile_timing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--optimize_every", type=int, default=2)
     parser.add_argument("--optimize_n_iter", type=int, default=256)
@@ -697,6 +759,12 @@ if __name__ == '__main__':
             ri_func_sample_size=args.ri_func_sample_size,
             ri_func_rankic_on_cpu=args.ri_func_rankic_on_cpu,
             ri_admission_gate=args.ri_admission_gate,
+            ri_func_backend=args.ri_func_backend,
+            ri_struct_backend=args.ri_struct_backend,
+            ri_corr_threshold=args.ri_corr_threshold,
+            ri_ast_similarity_threshold=args.ri_ast_similarity_threshold,
+            ri_corr_value_bonus=args.ri_corr_value_bonus,
+            ri_corr_underexplore_power=args.ri_corr_underexplore_power,
             profile_timing=args.profile_timing,
             optimize_every=args.optimize_every,
             optimize_n_iter=args.optimize_n_iter,

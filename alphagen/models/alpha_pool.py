@@ -24,6 +24,7 @@ from alphagen.data.expression import (
     RollingOperator,
     UnaryOperator,
 )
+from alphagen.models.alpha_cluster import cosine_similarity, extract_ast_feature_vector
 from alphagen.utils.correlation import batch_pearsonr, batch_spearmanr
 from alphagen.utils.pytorch_utils import masked_mean_std
 from alphagen_qlib.stock_data import StockData
@@ -71,6 +72,12 @@ class AlphaPool(AlphaPoolBase):
         ri_func_sample_size: int = 128,
         ri_func_rankic_on_cpu: bool = True,
         ri_admission_gate: bool = False,
+        ri_func_backend: str = "auto",
+        ri_struct_backend: str = "token_bigram",
+        ri_corr_threshold: float = 0.8,
+        ri_ast_similarity_threshold: float = 0.9,
+        ri_corr_value_bonus: float = 0.1,
+        ri_corr_underexplore_power: float = 1.0,
         profile_timing: bool = True,
         optimize_every: int = 2,
         optimize_n_iter: int = 256,
@@ -85,6 +92,7 @@ class AlphaPool(AlphaPoolBase):
         self.exprs: List[Optional[Expression]] = [None for _ in range(capacity + 1)]
         self.expr_tokens: List[Optional[List[str]]] = [None for _ in range(capacity + 1)]
         self.expr_bigrams: List[Optional[Set[Tuple[str, str]]]] = [None for _ in range(capacity + 1)]
+        self.expr_ast_features: List[Optional[np.ndarray]] = [None for _ in range(capacity + 1)]
         self.single_ics: np.ndarray = np.zeros(capacity + 1)
         self.mutual_ics: np.ndarray = np.identity(capacity + 1)
         self.weights: np.ndarray = np.zeros(capacity + 1)
@@ -106,6 +114,12 @@ class AlphaPool(AlphaPoolBase):
         self.ri_func_sample_size = max(0, int(ri_func_sample_size))
         self.ri_func_rankic_on_cpu = bool(ri_func_rankic_on_cpu)
         self.ri_admission_gate = bool(ri_admission_gate)
+        self.ri_func_backend = self._resolve_ri_func_backend(ri_func_backend)
+        self.ri_struct_backend = str(ri_struct_backend or "token_bigram")
+        self.ri_corr_threshold = float(ri_corr_threshold)
+        self.ri_ast_similarity_threshold = float(ri_ast_similarity_threshold)
+        self.ri_corr_value_bonus = float(ri_corr_value_bonus)
+        self.ri_corr_underexplore_power = float(ri_corr_underexplore_power)
         self.profile_timing = bool(profile_timing)
         self.optimize_every = max(1, int(optimize_every))
         self.optimize_n_iter = max(1, int(optimize_n_iter))
@@ -118,6 +132,8 @@ class AlphaPool(AlphaPoolBase):
         self.last_reward_info: Dict[str, Any] = {}
         self._ri_func_timing: Dict[str, Any] = {}
         self._structure_clusters: List[Dict[str, Any]] = []
+        self._ast_structure_clusters: List[Dict[str, Any]] = []
+        self._corr_clusters: List[Dict[str, Any]] = []
         self._timing_total: Dict[str, float] = {}
         self._timing_count: Dict[str, int] = {}
         self._single_ic_cache_size = max(0, int(os.getenv("ALPHAGEN_SINGLE_IC_CACHE_SIZE", "8192")))
@@ -234,10 +250,23 @@ class AlphaPool(AlphaPoolBase):
             "weights": list(self.weights[:self.size]),
             "last_reward_info": self.last_reward_info,
             "cluster_bank_summary": self.cluster_bank_summary,
+            "corr_cluster_bank_summary": self.corr_cluster_bank_summary,
+            "reward_backends": {
+                "ri_func_backend": self.ri_func_backend,
+                "ri_struct_backend": self.ri_struct_backend,
+                "ri_corr_threshold": self.ri_corr_threshold,
+                "ri_ast_similarity_threshold": self.ri_ast_similarity_threshold,
+            },
         }
 
     @property
     def cluster_bank_summary(self) -> List[Dict[str, Any]]:
+        if self.ri_struct_backend == "ast_cluster":
+            return self.ast_cluster_bank_summary
+        return self.token_cluster_bank_summary
+
+    @property
+    def token_cluster_bank_summary(self) -> List[Dict[str, Any]]:
         return [
             {
                 "cluster_id": int(cluster["cluster_id"]),
@@ -245,8 +274,37 @@ class AlphaPool(AlphaPoolBase):
                 "cluster_mean_re": float(cluster["mean_re"]),
                 "cluster_positive_re_rate": float(cluster["positive_re_rate"]),
                 "last_seen_eval": int(cluster["last_seen_eval"]),
+                "prototype_size": int(len(cluster.get("prototype", []))),
             }
             for cluster in self._structure_clusters
+        ]
+
+    @property
+    def ast_cluster_bank_summary(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "cluster_id": int(cluster["cluster_id"]),
+                "cluster_count": int(cluster["count"]),
+                "cluster_mean_re": float(cluster["mean_re"]),
+                "cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+                "last_seen_eval": int(cluster["last_seen_eval"]),
+                "prototype_expr_key": str(cluster.get("prototype_expr_key", "")),
+            }
+            for cluster in self._ast_structure_clusters
+        ]
+
+    @property
+    def corr_cluster_bank_summary(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "cluster_id": int(cluster["cluster_id"]),
+                "cluster_count": int(cluster["count"]),
+                "cluster_mean_re": float(cluster["mean_re"]),
+                "cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+                "last_seen_eval": int(cluster["last_seen_eval"]),
+                "representative_expr_key": str(cluster.get("representative_expr_key", "")),
+            }
+            for cluster in self._corr_clusters
         ]
 
     def _expr_key(self, expr: Expression) -> str:
@@ -254,6 +312,12 @@ class AlphaPool(AlphaPoolBase):
 
     def _mutual_key(self, lhs_key: str, rhs_key: str) -> Tuple[str, str]:
         return (lhs_key, rhs_key) if lhs_key <= rhs_key else (rhs_key, lhs_key)
+
+    def _resolve_ri_func_backend(self, backend: str) -> str:
+        backend = str(backend or "auto")
+        if backend == "auto":
+            return "residual" if self.reward_mode.startswith("re_v2") else "mutual_ic"
+        return backend
     def try_new_expr(self, expr: Expression, token_seq: Optional[List[str]] = None) -> Tuple[float, Dict]:
         t_try0 = time.perf_counter()
         t0 = time.perf_counter()
@@ -275,10 +339,13 @@ class AlphaPool(AlphaPoolBase):
             }
             return 0.0, info
 
+        expr_ast_feature = extract_ast_feature_vector(expr)
+        corr_cluster_pending: Optional[Dict[str, Any]] = None
         t0 = time.perf_counter()
-        ri_func = self._calc_ri_func_v2(expr) if self._use_v2 and self._use_ri_func else (
-            self._calc_ri_func(ic_mut) if self._use_ri_func else 0.0
-        )
+        ri_func = 0.0
+        ri_func_info: Dict[str, Any] = {}
+        if self._use_ri_func:
+            ri_func, ri_func_info, corr_cluster_pending = self._calc_ri_func_dispatch(expr, ic_mut, expr_ast_feature)
         self._record_timing("ri_func_sec", time.perf_counter() - t0)
         t0 = time.perf_counter()
         ri_reg = self._calc_ri_reg_v2(expr, token_seq) if self._use_v2 and self._use_ri_reg else (
@@ -288,7 +355,7 @@ class AlphaPool(AlphaPoolBase):
 
         prev_best_ic_ret = self.best_ic_ret
         t0 = time.perf_counter()
-        self._add_factor(expr, ic_ret, ic_mut, token_seq)
+        self._add_factor(expr, ic_ret, ic_mut, token_seq, expr_ast_feature)
         self._record_timing("add_factor_sec", time.perf_counter() - t0)
         self._optimize_eval_counter += 1
         optimize_executed = False
@@ -317,11 +384,11 @@ class AlphaPool(AlphaPoolBase):
         ri_struct = 0.0
         if self._use_ri_struct:
             t0 = time.perf_counter()
-            if self._use_v2:
-                ri_struct, cluster_info = self._calc_ri_struct_v2(token_seq, re)
-            else:
-                ri_struct = self._calc_ri_struct(token_seq)
+            ri_struct, cluster_info = self._calc_ri_struct_dispatch(expr, token_seq, re, expr_ast_feature)
             self._record_timing("ri_struct_sec", time.perf_counter() - t0)
+        corr_cluster_info: Dict[str, Any] = {}
+        if corr_cluster_pending is not None:
+            corr_cluster_info = self._finalize_corr_cluster(corr_cluster_pending, expr, re)
         t0 = time.perf_counter()
         reward_total, reward_lambda_t = self._compose_reward(re, ri_func, ri_struct, ri_reg)
         self._record_timing("compose_reward_sec", time.perf_counter() - t0)
@@ -338,6 +405,8 @@ class AlphaPool(AlphaPoolBase):
             "ic_single": float(ic_ret),
             "re_mode": self.re_mode,
             "reward_lambda_t": float(reward_lambda_t),
+            "ri_func_backend": self.ri_func_backend,
+            "ri_struct_backend": self.ri_struct_backend,
             "optimize_executed": bool(optimize_executed),
             "optimize_every": int(self.optimize_every),
             "optimize_n_iter": int(self.optimize_n_iter),
@@ -346,6 +415,8 @@ class AlphaPool(AlphaPoolBase):
         }
         if isinstance(getattr(self, "_ri_func_timing", None), dict):
             info.update(getattr(self, "_ri_func_timing"))
+        if ri_func_info:
+            info.update(ri_func_info)
         info.update(self._cache_snapshot())
         if self.profile_timing:
             prof = self.profile_snapshot()
@@ -362,6 +433,8 @@ class AlphaPool(AlphaPoolBase):
             )
         if cluster_info:
             info.update(cluster_info)
+        if corr_cluster_info:
+            info.update(corr_cluster_info)
         self.last_reward_info = info
         return reward_total, info
 
@@ -369,7 +442,7 @@ class AlphaPool(AlphaPoolBase):
         for expr in exprs:
             ic_ret, ic_mut = self._calc_ics(expr, ic_mut_threshold=None)
             assert ic_ret is not None and ic_mut is not None
-            self._add_factor(expr, ic_ret, ic_mut, None)
+            self._add_factor(expr, ic_ret, ic_mut, None, extract_ast_feature_vector(expr))
             assert self.size <= self.capacity
         self._optimize(alpha=self.l1_alpha, lr=5e-4, n_iter=self.optimize_n_iter)
 
@@ -464,7 +537,8 @@ class AlphaPool(AlphaPoolBase):
         expr: Expression,
         ic_ret: float,
         ic_mut: List[float],
-        token_seq: Optional[List[str]]
+        token_seq: Optional[List[str]],
+        ast_feature: Optional[np.ndarray]
     ):
         if self._under_thres_alpha and self.size == 1:
             self._pop()
@@ -475,6 +549,7 @@ class AlphaPool(AlphaPoolBase):
             self.expr_bigrams[n] = self._token_bigrams(token_seq)
         else:
             self.expr_bigrams[n] = None
+        self.expr_ast_features[n] = None if ast_feature is None else np.asarray(ast_feature, dtype=np.float32)
         self.single_ics[n] = ic_ret
         for i in range(n):
             self.mutual_ics[i][n] = self.mutual_ics[n][i] = ic_mut[i]
@@ -494,6 +569,7 @@ class AlphaPool(AlphaPoolBase):
         self.exprs[i], self.exprs[j] = self.exprs[j], self.exprs[i]
         self.expr_tokens[i], self.expr_tokens[j] = self.expr_tokens[j], self.expr_tokens[i]
         self.expr_bigrams[i], self.expr_bigrams[j] = self.expr_bigrams[j], self.expr_bigrams[i]
+        self.expr_ast_features[i], self.expr_ast_features[j] = self.expr_ast_features[j], self.expr_ast_features[i]
         self.single_ics[i], self.single_ics[j] = self.single_ics[j], self.single_ics[i]
         self.mutual_ics[:, [i, j]] = self.mutual_ics[:, [j, i]]
         self.mutual_ics[[i, j], :] = self.mutual_ics[[j, i], :]
@@ -624,6 +700,207 @@ class AlphaPool(AlphaPoolBase):
         }
         return float(metric.mean().item())
 
+    def _calc_ri_func_dispatch(
+        self,
+        expr: Expression,
+        ic_mut: List[float],
+        expr_ast_feature: np.ndarray,
+    ) -> Tuple[float, Dict[str, Any], Optional[Dict[str, Any]]]:
+        del expr_ast_feature
+        backend = self.ri_func_backend
+        if backend == "corr_cluster":
+            score, pending = self._calc_ri_func_corr_cluster(expr)
+            return score, {"ri_func_backend": backend}, pending
+        if backend == "residual":
+            return self._calc_ri_func_v2(expr), {"ri_func_backend": backend}, None
+        return self._calc_ri_func(ic_mut), {"ri_func_backend": "mutual_ic"}, None
+
+    def _calc_ri_func_corr_cluster(self, expr: Expression) -> Tuple[float, Dict[str, Any]]:
+        t0 = time.perf_counter()
+        cluster_idx, similarity, is_new = self._assign_corr_cluster(expr)
+        cluster = self._corr_clusters[cluster_idx]
+        count = max(1, int(cluster["count"]))
+        value_score = max(float(cluster["mean_re"]), 0.0)
+        underexplore = 1.0 / (count ** max(self.ri_corr_underexplore_power, 1e-6))
+        bonus = self.ri_corr_value_bonus * value_score * underexplore
+        if is_new:
+            bonus += 0.1 * self.ri_corr_value_bonus
+        score = float(bonus - similarity)
+        t1 = time.perf_counter()
+        self._ri_func_timing = {
+            "ri_func_eval_ms": 0.0,
+            "ri_func_stack_ms": 0.0,
+            "ri_func_lstsq_ms": 0.0,
+            "ri_func_metric_ms": (t1 - t0) * 1000.0,
+            "ri_func_total_ms": (t1 - t0) * 1000.0,
+            "ri_func_used_k": 1,
+            "ri_func_used_sample": 0,
+        }
+        return score, {
+            "cluster_idx": int(cluster_idx),
+            "cluster_similarity": float(similarity),
+            "cluster_is_new": bool(is_new),
+        }
+
+    def _assign_corr_cluster(self, expr: Expression) -> Tuple[int, float, bool]:
+        if not self._corr_clusters:
+            return self._new_corr_cluster(expr), 0.0, True
+        best_idx = -1
+        best_sim = -1.0
+        for idx, cluster in enumerate(self._corr_clusters):
+            rep_expr = cluster.get("representative_expr")
+            if rep_expr is None:
+                continue
+            sim = abs(self._get_mutual_ic_cached(expr, rep_expr))
+            if np.isnan(sim):
+                sim = 0.0
+            if sim > best_sim:
+                best_idx = idx
+                best_sim = sim
+        if best_idx < 0 or best_sim < self.ri_corr_threshold:
+            return self._new_corr_cluster(expr), max(best_sim, 0.0), True
+        return best_idx, best_sim, False
+
+    def _new_corr_cluster(self, expr: Expression) -> int:
+        cluster_idx = len(self._corr_clusters)
+        self._corr_clusters.append(
+            {
+                "cluster_id": cluster_idx,
+                "representative_expr": expr,
+                "representative_expr_key": self._expr_key(expr),
+                "count": 0,
+                "mean_re": 0.0,
+                "positive_re_rate": 0.0,
+                "positive_count": 0,
+                "last_seen_eval": -1,
+                "best_re": float("-inf"),
+            }
+        )
+        return cluster_idx
+
+    def _finalize_corr_cluster(self, pending: Dict[str, Any], expr: Expression, re_value: float) -> Dict[str, Any]:
+        cluster_idx = int(pending["cluster_idx"])
+        similarity = float(pending.get("cluster_similarity", 0.0))
+        is_new = bool(pending.get("cluster_is_new", False))
+        cluster = self._corr_clusters[cluster_idx]
+        self._update_corr_cluster(cluster_idx, expr, re_value)
+        cluster = self._corr_clusters[cluster_idx]
+        return {
+            "corr_cluster_id": cluster_idx,
+            "corr_cluster_count": int(cluster["count"]),
+            "corr_cluster_mean_re": float(cluster["mean_re"]),
+            "corr_cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+            "corr_cluster_similarity": similarity,
+            "corr_cluster_is_new": is_new,
+        }
+
+    def _update_corr_cluster(self, cluster_idx: int, expr: Expression, re_value: float) -> None:
+        cluster = self._corr_clusters[cluster_idx]
+        self._update_cluster_stats(cluster, re_value)
+        if float(re_value) >= float(cluster.get("best_re", float("-inf"))):
+            cluster["best_re"] = float(re_value)
+            cluster["representative_expr"] = expr
+            cluster["representative_expr_key"] = self._expr_key(expr)
+
+    def _calc_ri_struct_dispatch(
+        self,
+        expr: Expression,
+        token_seq: Optional[List[str]],
+        re_value: float,
+        expr_ast_feature: np.ndarray,
+    ) -> Tuple[float, Dict[str, Any]]:
+        if self.ri_struct_backend == "ast_cluster":
+            return self._calc_ri_struct_ast_v2(expr, expr_ast_feature, re_value)
+        if self._use_v2:
+            return self._calc_ri_struct_v2(token_seq, re_value)
+        return self._calc_ri_struct(token_seq), {
+            "cluster_id": -1,
+            "cluster_count": 0,
+            "cluster_mean_re": 0.0,
+            "cluster_positive_re_rate": 0.0,
+            "ri_struct_backend": "token_bigram",
+        }
+
+    def _calc_ri_struct_ast_v2(
+        self,
+        expr: Expression,
+        expr_ast_feature: np.ndarray,
+        re_value: float,
+    ) -> Tuple[float, Dict[str, Any]]:
+        cluster_idx, similarity, is_new = self._assign_ast_structure_cluster(expr_ast_feature, expr)
+        cluster = self._ast_structure_clusters[cluster_idx]
+        value_score = max(float(cluster["mean_re"]), 0.0)
+        count = max(1, int(cluster["count"]))
+        underexplore_score = 1.0 / (count ** max(self.ri_struct_underexplore_power, 1e-6))
+        new_cluster_bonus = 0.1 * self.ri_struct_value_bonus if int(cluster["count"]) == 0 else 0.0
+        bonus = self.ri_struct_value_bonus * value_score * underexplore_score + new_cluster_bonus
+        self._update_ast_structure_cluster(cluster_idx, expr_ast_feature, expr, re_value)
+        cluster = self._ast_structure_clusters[cluster_idx]
+        return float(bonus), {
+            "cluster_id": int(cluster_idx),
+            "cluster_count": int(cluster["count"]),
+            "cluster_mean_re": float(cluster["mean_re"]),
+            "cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+            "ast_cluster_id": int(cluster_idx),
+            "ast_cluster_count": int(cluster["count"]),
+            "ast_cluster_mean_re": float(cluster["mean_re"]),
+            "ast_cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+            "ast_cluster_similarity": float(similarity),
+            "ast_cluster_is_new": bool(is_new),
+            "ri_struct_backend": "ast_cluster",
+        }
+
+    def _assign_ast_structure_cluster(self, expr_ast_feature: np.ndarray, expr: Expression) -> Tuple[int, float, bool]:
+        if not self._ast_structure_clusters:
+            return self._new_ast_structure_cluster(expr_ast_feature, expr), 0.0, True
+        best_idx = -1
+        best_sim = -1.0
+        for idx, cluster in enumerate(self._ast_structure_clusters):
+            prototype = cluster.get("prototype_feature")
+            if prototype is None:
+                continue
+            sim = cosine_similarity(expr_ast_feature, prototype)
+            if sim > best_sim:
+                best_idx = idx
+                best_sim = sim
+        if best_idx < 0 or best_sim < self.ri_ast_similarity_threshold:
+            return self._new_ast_structure_cluster(expr_ast_feature, expr), max(best_sim, 0.0), True
+        return best_idx, best_sim, False
+
+    def _new_ast_structure_cluster(self, expr_ast_feature: np.ndarray, expr: Expression) -> int:
+        cluster_idx = len(self._ast_structure_clusters)
+        self._ast_structure_clusters.append(
+            {
+                "cluster_id": cluster_idx,
+                "prototype_feature": np.asarray(expr_ast_feature, dtype=np.float32).copy(),
+                "prototype_expr_key": self._expr_key(expr),
+                "count": 0,
+                "mean_re": 0.0,
+                "positive_re_rate": 0.0,
+                "positive_count": 0,
+                "last_seen_eval": -1,
+                "best_re": float("-inf"),
+            }
+        )
+        return cluster_idx
+
+    def _update_ast_structure_cluster(
+        self,
+        cluster_idx: int,
+        expr_ast_feature: np.ndarray,
+        expr: Expression,
+        re_value: float,
+    ) -> None:
+        cluster = self._ast_structure_clusters[cluster_idx]
+        count = int(cluster["count"])
+        prototype = np.asarray(cluster["prototype_feature"], dtype=np.float32)
+        expr_ast_feature = np.asarray(expr_ast_feature, dtype=np.float32)
+        cluster["prototype_feature"] = ((prototype * count) + expr_ast_feature) / max(1, count + 1)
+        self._update_cluster_stats(cluster, re_value)
+        if float(re_value) >= float(cluster.get("best_re", float("-inf"))):
+            cluster["best_re"] = float(re_value)
+            cluster["prototype_expr_key"] = self._expr_key(expr)
+
     def _calc_ri_struct(self, token_seq: Optional[List[str]]) -> float:
         if token_seq is None or len(token_seq) < 2 or self.size == 0:
             return 0.0
@@ -655,6 +932,7 @@ class AlphaPool(AlphaPoolBase):
                 "cluster_count": 0,
                 "cluster_mean_re": 0.0,
                 "cluster_positive_re_rate": 0.0,
+                "ri_struct_backend": "token_bigram",
             }
         new_bigrams = self._token_bigrams(token_seq)
         if not new_bigrams:
@@ -663,6 +941,7 @@ class AlphaPool(AlphaPoolBase):
                 "cluster_count": 0,
                 "cluster_mean_re": 0.0,
                 "cluster_positive_re_rate": 0.0,
+                "ri_struct_backend": "token_bigram",
             }
         cluster_idx = self._assign_structure_cluster(new_bigrams)
         cluster = self._structure_clusters[cluster_idx]
@@ -678,6 +957,11 @@ class AlphaPool(AlphaPoolBase):
             "cluster_count": int(cluster["count"]),
             "cluster_mean_re": float(cluster["mean_re"]),
             "cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+            "token_cluster_id": int(cluster_idx),
+            "token_cluster_count": int(cluster["count"]),
+            "token_cluster_mean_re": float(cluster["mean_re"]),
+            "token_cluster_positive_re_rate": float(cluster["positive_re_rate"]),
+            "ri_struct_backend": "token_bigram",
         }
 
     def _calc_ri_reg(self, token_seq: Optional[List[str]]) -> float:
@@ -757,6 +1041,9 @@ class AlphaPool(AlphaPoolBase):
 
     def _update_structure_cluster(self, cluster_idx: int, re_value: float) -> None:
         cluster = self._structure_clusters[cluster_idx]
+        self._update_cluster_stats(cluster, re_value)
+
+    def _update_cluster_stats(self, cluster: Dict[str, Any], re_value: float) -> None:
         count = int(cluster["count"])
         positive_count = int(cluster["positive_count"])
         new_count = count + 1

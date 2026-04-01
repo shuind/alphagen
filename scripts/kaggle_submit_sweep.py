@@ -98,6 +98,12 @@ def _extract_first(pattern: str, text: str, default: str) -> str:
     return m.group(1) if m else default
 
 
+def _choose_flag_value(source: str, flag: str, override: Optional[str], default: str) -> str:
+    if override is not None and str(override).strip() != "":
+        return str(override).strip()
+    return _extract_first(rf"{re.escape(flag)}\s+([^\s\\]+)", source, default)
+
+
 def _render_train_cell(
     source: str,
     seed: int,
@@ -105,6 +111,12 @@ def _render_train_cell(
     reward_mode: str,
     step: int,
     run_name: str,
+    ri_func_backend: Optional[str] = None,
+    ri_struct_backend: Optional[str] = None,
+    ri_corr_threshold: Optional[str] = None,
+    ri_ast_similarity_threshold: Optional[str] = None,
+    ri_corr_value_bonus: Optional[str] = None,
+    ri_corr_underexplore_power: Optional[str] = None,
 ) -> str:
     market = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+([^\s\\]+)\s+\d+", source, "tcsi300")
     pool = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+[^\s\\]+\s+(\d+)", source, "20")
@@ -116,6 +128,22 @@ def _render_train_cell(
     ri_struct_value_bonus = _extract_first(r"--ri_struct_value_bonus\s+([^\s\\]+)", source, "0.1")
     ri_struct_underexplore_power = _extract_first(r"--ri_struct_underexplore_power\s+([^\s\\]+)", source, "1.0")
     ri_func_metric = _extract_first(r"--ri_func_metric\s+([^\s\\]+)", source, "ic")
+    ri_func_backend_value = _choose_flag_value(source, "--ri_func_backend", ri_func_backend, "auto")
+    ri_struct_backend_value = _choose_flag_value(source, "--ri_struct_backend", ri_struct_backend, "token_bigram")
+    ri_corr_threshold_value = _choose_flag_value(source, "--ri_corr_threshold", ri_corr_threshold, "0.8")
+    ri_ast_similarity_threshold_value = _choose_flag_value(
+        source,
+        "--ri_ast_similarity_threshold",
+        ri_ast_similarity_threshold,
+        "0.9",
+    )
+    ri_corr_value_bonus_value = _choose_flag_value(source, "--ri_corr_value_bonus", ri_corr_value_bonus, "0.1")
+    ri_corr_underexplore_power_value = _choose_flag_value(
+        source,
+        "--ri_corr_underexplore_power",
+        ri_corr_underexplore_power,
+        "1.0",
+    )
     optimize_every = _extract_first(r"--optimize_every\s+([^\s\\]+)", source, "2")
     optimize_n_iter = _extract_first(r"--optimize_n_iter\s+([^\s\\]+)", source, "256")
     logdir = _extract_first(r"--logdir\s+([^\s\\]+)", source, "/kaggle/working/runs")
@@ -135,6 +163,12 @@ def _render_train_cell(
         f"  --ri_struct_value_bonus {ri_struct_value_bonus} \\",
         f"  --ri_struct_underexplore_power {ri_struct_underexplore_power} \\",
         f"  --ri_func_metric {ri_func_metric} \\",
+        f"  --ri_func_backend {ri_func_backend_value} \\",
+        f"  --ri_struct_backend {ri_struct_backend_value} \\",
+        f"  --ri_corr_threshold {ri_corr_threshold_value} \\",
+        f"  --ri_ast_similarity_threshold {ri_ast_similarity_threshold_value} \\",
+        f"  --ri_corr_value_bonus {ri_corr_value_bonus_value} \\",
+        f"  --ri_corr_underexplore_power {ri_corr_underexplore_power_value} \\",
         "  --profile_timing \\",
         f"  --optimize_every {optimize_every} \\",
         f"  --optimize_n_iter {optimize_n_iter} \\",
@@ -156,6 +190,12 @@ def _update_train_cell_source(
     reward_mode: str,
     step: int,
     run_name: str,
+    ri_func_backend: Optional[str] = None,
+    ri_struct_backend: Optional[str] = None,
+    ri_corr_threshold: Optional[str] = None,
+    ri_ast_similarity_threshold: Optional[str] = None,
+    ri_corr_value_bonus: Optional[str] = None,
+    ri_corr_underexplore_power: Optional[str] = None,
 ) -> str:
     if "train_maskable_ppo.py" not in source:
         return source
@@ -166,6 +206,12 @@ def _update_train_cell_source(
         reward_mode=reward_mode,
         step=step,
         run_name=run_name,
+        ri_func_backend=ri_func_backend,
+        ri_struct_backend=ri_struct_backend,
+        ri_corr_threshold=ri_corr_threshold,
+        ri_ast_similarity_threshold=ri_ast_similarity_threshold,
+        ri_corr_value_bonus=ri_corr_value_bonus,
+        ri_corr_underexplore_power=ri_corr_underexplore_power,
     )
 
 
@@ -176,6 +222,12 @@ def _rewrite_notebook(
     reward_mode: str,
     step: int,
     run_name: str,
+    ri_func_backend: Optional[str] = None,
+    ri_struct_backend: Optional[str] = None,
+    ri_corr_threshold: Optional[str] = None,
+    ri_ast_similarity_threshold: Optional[str] = None,
+    ri_corr_value_bonus: Optional[str] = None,
+    ri_corr_underexplore_power: Optional[str] = None,
 ) -> None:
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
     changed = False
@@ -185,7 +237,20 @@ def _rewrite_notebook(
         src = "".join(cell.get("source", []))
         if "train_maskable_ppo.py" not in src:
             continue
-        new_src = _update_train_cell_source(src, seed, backbone, reward_mode, step, run_name)
+        new_src = _update_train_cell_source(
+            src,
+            seed,
+            backbone,
+            reward_mode,
+            step,
+            run_name,
+            ri_func_backend=ri_func_backend,
+            ri_struct_backend=ri_struct_backend,
+            ri_corr_threshold=ri_corr_threshold,
+            ri_ast_similarity_threshold=ri_ast_similarity_threshold,
+            ri_corr_value_bonus=ri_corr_value_bonus,
+            ri_corr_underexplore_power=ri_corr_underexplore_power,
+        )
         if new_src != src:
             cell["source"] = new_src.splitlines(keepends=True)
             changed = True
@@ -266,6 +331,14 @@ def main() -> None:
     parser.add_argument("--reward-suffixes", type=str, default="base,func,struct,reg,all",
                         help="used only when --reward-modes is empty")
     parser.add_argument("--step", type=int, default=64000)
+    parser.add_argument("--ri-func-backend", type=str, default="",
+                        choices=["", "auto", "mutual_ic", "residual", "corr_cluster"])
+    parser.add_argument("--ri-struct-backend", type=str, default="",
+                        choices=["", "token_bigram", "ast_cluster"])
+    parser.add_argument("--ri-corr-threshold", type=str, default="")
+    parser.add_argument("--ri-ast-similarity-threshold", type=str, default="")
+    parser.add_argument("--ri-corr-value-bonus", type=str, default="")
+    parser.add_argument("--ri-corr-underexplore-power", type=str, default="")
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--state-path", type=str, default="platform_v2/runtime/kaggle_submit_state.json")
@@ -328,6 +401,12 @@ def main() -> None:
                         reward_mode=str(job["reward_mode"]),
                         step=int(args.step),
                         run_name=run_name,
+                        ri_func_backend=(args.ri_func_backend or None),
+                        ri_struct_backend=(args.ri_struct_backend or None),
+                        ri_corr_threshold=(args.ri_corr_threshold or None),
+                        ri_ast_similarity_threshold=(args.ri_ast_similarity_threshold or None),
+                        ri_corr_value_bonus=(args.ri_corr_value_bonus or None),
+                        ri_corr_underexplore_power=(args.ri_corr_underexplore_power or None),
                     )
                     if args.dry_run:
                         output = "[dry-run] skipped kaggle kernels push"
