@@ -43,6 +43,13 @@ class YearCalculatorBuild:
     error: str = ""
 
 
+@dataclass
+class CalculatorCacheEntry:
+    calculators: Dict[int, QLibStockDataCalculator]
+    year_build_stats: List[YearCalculatorBuild]
+    build_total_sec: float
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -472,6 +479,24 @@ def _build_year_calculators(
     return calculators, build_stats
 
 
+def _calc_cache_key(
+    provider_uri: str,
+    market: str,
+    device: torch.device,
+    max_backtrack_days: int,
+    max_future_days: int,
+    eval_years: Iterable[int],
+) -> Tuple[str, str, str, int, int, Tuple[int, ...]]:
+    return (
+        provider_uri,
+        market,
+        str(device),
+        int(max_backtrack_days),
+        int(max_future_days),
+        tuple(sorted(list(eval_years))),
+    )
+
+
 def _extract_year_from_value(value: Any) -> Optional[int]:
     if value is None:
         return None
@@ -621,6 +646,7 @@ def _evaluate_run(
     run_id: str,
     runs_root: Path,
     args: argparse.Namespace,
+    calculator_cache: Optional[Dict[Tuple[str, str, str, int, int, Tuple[int, ...]], CalculatorCacheEntry]] = None,
 ) -> Dict:
     run_path = _resolve_run_path(runs_root, run_id)
     if run_path is None:
@@ -664,15 +690,41 @@ def _evaluate_run(
         f"(total={len(eval_years)})"
     )
 
-    calc_build_t0 = time.perf_counter()
-    calculators, year_build_stats = _build_year_calculators(
+    cache_key = _calc_cache_key(
+        provider_uri=provider_uri,
         market=args.market,
-        eval_years=eval_years,
         device=device,
         max_backtrack_days=args.max_backtrack_days,
         max_future_days=args.max_future_days,
+        eval_years=eval_years,
     )
-    calc_build_total_sec = max(0.0, time.perf_counter() - calc_build_t0)
+    calculators: Dict[int, QLibStockDataCalculator]
+    year_build_stats: List[YearCalculatorBuild]
+    calc_build_total_sec: float
+    calc_build_cache_hit = False
+    if calculator_cache is not None and cache_key in calculator_cache:
+        cache_entry = calculator_cache[cache_key]
+        calculators = cache_entry.calculators
+        year_build_stats = cache_entry.year_build_stats
+        calc_build_total_sec = 0.0
+        calc_build_cache_hit = True
+        print(f"[year] reuse cached calculators: years={len(calculators)}")
+    else:
+        calc_build_t0 = time.perf_counter()
+        calculators, year_build_stats = _build_year_calculators(
+            market=args.market,
+            eval_years=eval_years,
+            device=device,
+            max_backtrack_days=args.max_backtrack_days,
+            max_future_days=args.max_future_days,
+        )
+        calc_build_total_sec = max(0.0, time.perf_counter() - calc_build_t0)
+        if calculator_cache is not None:
+            calculator_cache[cache_key] = CalculatorCacheEntry(
+                calculators=calculators,
+                year_build_stats=year_build_stats,
+                build_total_sec=calc_build_total_sec,
+            )
 
     if not calculators:
         raise RuntimeError("no yearly calculators built successfully")
@@ -979,6 +1031,7 @@ def _evaluate_run(
         "checkpoint_evaluated": len(stability_df),
         "timing": {
             "build_year_calculators_sec": calc_build_total_sec,
+            "build_year_calculators_cache_hit": calc_build_cache_hit,
             "step_eval_total_sec": float(sum(item["elapsed_sec"] for item in step_timing_rows)),
             "step_eval_rows": step_timing_rows,
             "year_build_rows": [
@@ -1071,10 +1124,16 @@ def main() -> None:
 
     results = []
     failed = []
+    calculator_cache: Dict[Tuple[str, str, str, int, int, Tuple[int, ...]], CalculatorCacheEntry] = {}
     for run_id in run_ids:
         try:
             print(f"[start] evaluating run={run_id}")
-            result = _evaluate_run(run_id=run_id, runs_root=runs_root, args=args)
+            result = _evaluate_run(
+                run_id=run_id,
+                runs_root=runs_root,
+                args=args,
+                calculator_cache=calculator_cache,
+            )
             results.append(result)
             print(f"[done] run={run_id} output={result['output_dir']}")
         except Exception as exc:

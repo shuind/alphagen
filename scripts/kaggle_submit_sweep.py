@@ -61,6 +61,21 @@ def _run(cmd: List[str], cwd: Optional[Path] = None) -> str:
     return proc.stdout
 
 
+def _run_with_retries(cmd: List[str], retries: int, backoff_sec: float, cwd: Optional[Path] = None) -> str:
+    last_err: Optional[Exception] = None
+    for attempt in range(1, retries + 1):
+        try:
+            return _run(cmd, cwd=cwd)
+        except Exception as e:
+            last_err = e
+            if attempt >= retries:
+                break
+            sleep_for = backoff_sec * attempt
+            print(f"    [retry] attempt={attempt}/{retries} failed, sleep={sleep_for:.1f}s")
+            time.sleep(sleep_for)
+    raise RuntimeError(f"all retries failed ({retries}): {last_err}")
+
+
 def _detect_notebook_file(kernel_dir: Path) -> Path:
     notebooks = sorted(kernel_dir.glob("*.ipynb"))
     if not notebooks:
@@ -78,6 +93,62 @@ def _replace_or_insert_flag(cmd: str, flag: str, value: str) -> str:
     return f"{cmd}\n  {flag} {value} \\"
 
 
+def _extract_first(pattern: str, text: str, default: str) -> str:
+    m = re.search(pattern, text)
+    return m.group(1) if m else default
+
+
+def _render_train_cell(
+    source: str,
+    seed: int,
+    backbone: str,
+    reward_mode: str,
+    step: int,
+    run_name: str,
+) -> str:
+    market = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+([^\s\\]+)\s+\d+", source, "tcsi300")
+    pool = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+[^\s\\]+\s+(\d+)", source, "20")
+    lambda_ri = _extract_first(r"--lambda_ri\s+([^\s\\]+)", source, "0.3")
+    ri_func_weight = _extract_first(r"--ri_func_weight\s+([^\s\\]+)", source, "1.0")
+    ri_struct_weight = _extract_first(r"--ri_struct_weight\s+([^\s\\]+)", source, "0.3")
+    ri_reg_weight = _extract_first(r"--ri_reg_weight\s+([^\s\\]+)", source, "0.3")
+    ri_schedule_decay = _extract_first(r"--ri_schedule_decay\s+([^\s\\]+)", source, "1e-4")
+    ri_struct_value_bonus = _extract_first(r"--ri_struct_value_bonus\s+([^\s\\]+)", source, "0.1")
+    ri_struct_underexplore_power = _extract_first(r"--ri_struct_underexplore_power\s+([^\s\\]+)", source, "1.0")
+    ri_func_metric = _extract_first(r"--ri_func_metric\s+([^\s\\]+)", source, "ic")
+    optimize_every = _extract_first(r"--optimize_every\s+([^\s\\]+)", source, "2")
+    optimize_n_iter = _extract_first(r"--optimize_n_iter\s+([^\s\\]+)", source, "256")
+    logdir = _extract_first(r"--logdir\s+([^\s\\]+)", source, "/kaggle/working/runs")
+    ckpt_dir = _extract_first(r"--ckpt_dir\s+([^\s\\]+)", source, "/kaggle/working/checkpoints")
+    tb_dir = _extract_first(r"--tb_dir\s+([^\s\\]+)", source, "/kaggle/working/tb_log")
+    provider_uri = _extract_first(r"--provider_uri\s+([^\s\\]+)", source, "")
+
+    lines = [
+        f"!python train_maskable_ppo.py {seed} {market} {pool} --step {step} \\",
+        f"  --backbone {backbone} \\",
+        f"  --reward_mode {reward_mode} \\",
+        f"  --lambda_ri {lambda_ri} \\",
+        f"  --ri_func_weight {ri_func_weight} \\",
+        f"  --ri_struct_weight {ri_struct_weight} \\",
+        f"  --ri_reg_weight {ri_reg_weight} \\",
+        f"  --ri_schedule_decay {ri_schedule_decay} \\",
+        f"  --ri_struct_value_bonus {ri_struct_value_bonus} \\",
+        f"  --ri_struct_underexplore_power {ri_struct_underexplore_power} \\",
+        f"  --ri_func_metric {ri_func_metric} \\",
+        "  --profile_timing \\",
+        f"  --optimize_every {optimize_every} \\",
+        f"  --optimize_n_iter {optimize_n_iter} \\",
+        f"  --logdir {logdir} \\",
+        f"  --ckpt_dir {ckpt_dir} \\",
+        f"  --tb_dir {tb_dir} \\",
+        f"  --run_name {run_name}",
+    ]
+    if provider_uri:
+        lines[-1] = f"{lines[-1]} \\"
+        lines.append(f"  --provider_uri {provider_uri}")
+    return "\n".join(lines) + "\n"
+
+
 def _update_train_cell_source(
     source: str,
     seed: int,
@@ -88,18 +159,14 @@ def _update_train_cell_source(
 ) -> str:
     if "train_maskable_ppo.py" not in source:
         return source
-    source = re.sub(
-        r"(train_maskable_ppo\.py\s+)(\d+)",
-        rf"\g<1>{seed}",
-        source,
-        count=1,
+    return _render_train_cell(
+        source=source,
+        seed=seed,
+        backbone=backbone,
+        reward_mode=reward_mode,
+        step=step,
+        run_name=run_name,
     )
-    source = _replace_or_insert_flag(source, "--backbone", backbone)
-    source = _replace_or_insert_flag(source, "--reward_mode", reward_mode)
-    source = _replace_or_insert_flag(source, "--step", str(step))
-    source = _replace_or_insert_flag(source, "--run_name", run_name)
-    source = re.sub(r"--save_model_ckpt(\s+|\\\n)?", "", source)
-    return source
 
 
 def _rewrite_notebook(
@@ -178,6 +245,12 @@ def _pending_indices(state: Dict) -> List[int]:
     return [i for i, j in enumerate(state["jobs"]) if j["status"] == "pending"]
 
 
+def _runnable_indices(state: Dict, retry_failed: bool) -> List[int]:
+    if retry_failed:
+        return [i for i, j in enumerate(state["jobs"]) if j["status"] in {"pending", "failed"}]
+    return _pending_indices(state)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Submit Kaggle training sweep in timed batches.")
     parser.add_argument("--kernel-dirs", type=str, required=True,
@@ -197,6 +270,10 @@ def main() -> None:
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--state-path", type=str, default="platform_v2/runtime/kaggle_submit_state.json")
     parser.add_argument("--force-reset", action="store_true")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="include failed jobs in runnable queue when resuming")
+    parser.add_argument("--max-push-retries", type=int, default=3)
+    parser.add_argument("--push-retry-backoff-sec", type=float, default=20.0)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -217,19 +294,22 @@ def main() -> None:
     _save_state(state_path, state)
 
     print(f"[init] total_jobs={len(state['jobs'])} pending={len(_pending_indices(state))}")
+    if args.retry_failed:
+        failed_count = sum(1 for j in state["jobs"] if j["status"] == "failed")
+        print(f"[init] retry_failed=True failed={failed_count}")
     print(f"[init] interval={args.interval_minutes}min batch_size={args.submit_batch_size}")
     print(f"[init] state_file={state_path}")
 
     batch_round = 0
     try:
         while True:
-            pending = _pending_indices(state)
-            if not pending:
+            runnable = _runnable_indices(state, args.retry_failed)
+            if not runnable:
                 print("[done] all jobs submitted.")
                 break
             batch_round += 1
-            batch = pending[: args.submit_batch_size]
-            print(f"[round {batch_round}] submitting {len(batch)} job(s), remaining_after={len(pending) - len(batch)}")
+            batch = runnable[: args.submit_batch_size]
+            print(f"[round {batch_round}] submitting {len(batch)} job(s), remaining_after={len(runnable) - len(batch)}")
             for order, idx in enumerate(batch):
                 job = state["jobs"][idx]
                 kernel_dir = kernel_dirs[(batch_round + order - 1) % len(kernel_dirs)]
@@ -252,7 +332,11 @@ def main() -> None:
                     if args.dry_run:
                         output = "[dry-run] skipped kaggle kernels push"
                     else:
-                        output = _run(["kaggle", "kernels", "push", "-p", str(kernel_dir)])
+                        output = _run_with_retries(
+                            ["kaggle", "kernels", "push", "-p", str(kernel_dir)],
+                            retries=max(1, int(args.max_push_retries)),
+                            backoff_sec=max(1.0, float(args.push_retry_backoff_sec)),
+                        )
                     job["status"] = "submitted"
                     job["kernel_dir"] = str(kernel_dir)
                     job["pushed_at"] = _now()
@@ -271,7 +355,7 @@ def main() -> None:
                     print(f"    [failed] {job['job_id']} -> {e}")
                 _save_state(state_path, state)
 
-            if _pending_indices(state):
+            if _runnable_indices(state, args.retry_failed):
                 sleep_sec = max(1.0, args.interval_minutes * 60.0)
                 print(f"[round {batch_round}] sleeping {sleep_sec:.0f}s ... (Ctrl+C to stop, state auto-saved)")
                 time.sleep(sleep_sec)

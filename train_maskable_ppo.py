@@ -402,8 +402,8 @@ def main(
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
 
-    train_start_time = '2014-01-01'
-    train_end_time = '2018-12-31'
+    train_start_time = '2010-01-01'
+    train_end_time = '2019-12-31'
     valid_start_time = '2020-01-01'
     valid_end_time = '2020-12-31'
     test_start_time = '2021-01-01'
