@@ -44,6 +44,12 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "RI_func",
         "RI_struct",
         "RI_reg",
+        "turnover_mean",
+        "turnover_penalty",
+        "turnover_weight",
+        "turnover_topk",
+        "turnover_baseline",
+        "turnover_step_stride",
         "reward_lambda_t",
         "ri_func_backend",
         "ri_struct_backend",
@@ -227,6 +233,12 @@ class CustomCallback(BaseCallback):
                 "RI_func": getattr(self.pool, "last_reward_info", {}).get("ri_func", math.nan),
                 "RI_struct": getattr(self.pool, "last_reward_info", {}).get("ri_struct", math.nan),
                 "RI_reg": getattr(self.pool, "last_reward_info", {}).get("ri_reg", math.nan),
+                "turnover_mean": getattr(self.pool, "last_reward_info", {}).get("turnover_mean", math.nan),
+                "turnover_penalty": getattr(self.pool, "last_reward_info", {}).get("turnover_penalty", math.nan),
+                "turnover_weight": getattr(self.pool, "last_reward_info", {}).get("turnover_weight", math.nan),
+                "turnover_topk": getattr(self.pool, "last_reward_info", {}).get("turnover_topk", math.nan),
+                "turnover_baseline": getattr(self.pool, "last_reward_info", {}).get("turnover_baseline", math.nan),
+                "turnover_step_stride": getattr(self.pool, "last_reward_info", {}).get("turnover_step_stride", math.nan),
                 "reward_lambda_t": getattr(self.pool, "last_reward_info", {}).get("reward_lambda_t", math.nan),
                 "ri_func_backend": getattr(self.pool, "last_reward_info", {}).get("ri_func_backend", math.nan),
                 "ri_struct_backend": getattr(self.pool, "last_reward_info", {}).get("ri_struct_backend", math.nan),
@@ -392,6 +404,10 @@ def main(
     ri_ast_similarity_threshold: float = 0.9,
     ri_corr_value_bonus: float = 0.1,
     ri_corr_underexplore_power: float = 1.0,
+    ri_turnover_weight: float = 0.0,
+    ri_turnover_topk: int = 30,
+    ri_turnover_baseline: float = 0.5,
+    ri_turnover_step_stride: int = 5,
     profile_timing: bool = True,
     optimize_every: int = 2,
     optimize_n_iter: int = 256,
@@ -501,6 +517,10 @@ def main(
         ri_ast_similarity_threshold=ri_ast_similarity_threshold,
         ri_corr_value_bonus=ri_corr_value_bonus,
         ri_corr_underexplore_power=ri_corr_underexplore_power,
+        ri_turnover_weight=ri_turnover_weight,
+        ri_turnover_topk=ri_turnover_topk,
+        ri_turnover_baseline=ri_turnover_baseline,
+        ri_turnover_step_stride=ri_turnover_step_stride,
         profile_timing=profile_timing,
         optimize_every=optimize_every,
         optimize_n_iter=optimize_n_iter,
@@ -553,6 +573,10 @@ def main(
                     "ri_ast_similarity_threshold": ri_ast_similarity_threshold,
                     "ri_corr_value_bonus": ri_corr_value_bonus,
                     "ri_corr_underexplore_power": ri_corr_underexplore_power,
+                    "ri_turnover_weight": ri_turnover_weight,
+                    "ri_turnover_topk": ri_turnover_topk,
+                    "ri_turnover_baseline": ri_turnover_baseline,
+                    "ri_turnover_step_stride": ri_turnover_step_stride,
                     "profile_timing": profile_timing,
                     "optimize_every": optimize_every,
                     "optimize_n_iter": optimize_n_iter,
@@ -710,6 +734,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ri_ast_similarity_threshold", type=float, default=0.9)
     parser.add_argument("--ri_corr_value_bonus", type=float, default=0.1)
     parser.add_argument("--ri_corr_underexplore_power", type=float, default=1.0)
+    parser.add_argument("--ri_turnover_weight", type=float, default=0.0)
+    parser.add_argument("--ri_turnover_topk", type=int, default=30)
+    parser.add_argument("--ri_turnover_baseline", type=float, default=0.5)
+    parser.add_argument("--ri_turnover_step_stride", type=int, default=5)
     parser.add_argument("--profile_timing", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--optimize_every", type=int, default=2)
     parser.add_argument("--optimize_n_iter", type=int, default=256)
@@ -765,6 +793,10 @@ if __name__ == '__main__':
             ri_ast_similarity_threshold=args.ri_ast_similarity_threshold,
             ri_corr_value_bonus=args.ri_corr_value_bonus,
             ri_corr_underexplore_power=args.ri_corr_underexplore_power,
+            ri_turnover_weight=args.ri_turnover_weight,
+            ri_turnover_topk=args.ri_turnover_topk,
+            ri_turnover_baseline=args.ri_turnover_baseline,
+            ri_turnover_step_stride=args.ri_turnover_step_stride,
             profile_timing=args.profile_timing,
             optimize_every=args.optimize_every,
             optimize_n_iter=args.optimize_n_iter,

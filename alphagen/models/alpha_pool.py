@@ -78,6 +78,10 @@ class AlphaPool(AlphaPoolBase):
         ri_ast_similarity_threshold: float = 0.9,
         ri_corr_value_bonus: float = 0.1,
         ri_corr_underexplore_power: float = 1.0,
+        ri_turnover_weight: float = 0.0,
+        ri_turnover_topk: int = 30,
+        ri_turnover_baseline: float = 0.5,
+        ri_turnover_step_stride: int = 5,
         profile_timing: bool = True,
         optimize_every: int = 2,
         optimize_n_iter: int = 256,
@@ -120,6 +124,10 @@ class AlphaPool(AlphaPoolBase):
         self.ri_ast_similarity_threshold = float(ri_ast_similarity_threshold)
         self.ri_corr_value_bonus = float(ri_corr_value_bonus)
         self.ri_corr_underexplore_power = float(ri_corr_underexplore_power)
+        self.ri_turnover_weight = float(ri_turnover_weight)
+        self.ri_turnover_topk = max(1, int(ri_turnover_topk))
+        self.ri_turnover_baseline = float(ri_turnover_baseline)
+        self.ri_turnover_step_stride = max(1, int(ri_turnover_step_stride))
         self.profile_timing = bool(profile_timing)
         self.optimize_every = max(1, int(optimize_every))
         self.optimize_n_iter = max(1, int(optimize_n_iter))
@@ -375,6 +383,11 @@ class AlphaPool(AlphaPoolBase):
         t0 = time.perf_counter()
         new_ic_ret = self.evaluate_ensemble()
         self._record_timing("evaluate_ensemble_sec", time.perf_counter() - t0)
+        turnover_mean = math.nan
+        turnover_penalty = 0.0
+        if self._use_ri_reg and self.ri_turnover_weight > 0.0:
+            turnover_mean, turnover_penalty = self._calc_pool_turnover_penalty()
+            ri_reg += self.ri_turnover_weight * turnover_penalty
         increment = new_ic_ret - prev_best_ic_ret
         if increment > 0:
             self.best_ic_ret = new_ic_ret
@@ -398,6 +411,12 @@ class AlphaPool(AlphaPoolBase):
             "ri_func": float(ri_func),
             "ri_struct": float(ri_struct),
             "ri_reg": float(ri_reg),
+            "turnover_mean": float(turnover_mean) if math.isfinite(turnover_mean) else math.nan,
+            "turnover_penalty": float(turnover_penalty),
+            "turnover_weight": float(self.ri_turnover_weight),
+            "turnover_topk": int(self.ri_turnover_topk),
+            "turnover_baseline": float(self.ri_turnover_baseline),
+            "turnover_step_stride": int(self.ri_turnover_step_stride),
             "reward_total": float(reward_total),
             "reward_pool": float(reward_total),
             "ic_ensemble": float(new_ic_ret),
@@ -984,6 +1003,51 @@ class AlphaPool(AlphaPoolBase):
         depth_penalty = max(0.0, (self._expr_depth(expr) - 4) / 4.0)
         risky_penalty = self._risky_operator_count(expr) / max(1.0, length)
         return -float(length_penalty + depth_penalty + risky_penalty)
+
+    def _calc_pool_turnover_penalty(self) -> Tuple[float, float]:
+        make_ensemble = getattr(self.calculator, "make_ensemble_alpha", None)
+        if not callable(make_ensemble) or self.size <= 0:
+            return math.nan, 0.0
+        try:
+            with torch.no_grad():
+                signal = make_ensemble(self.exprs[:self.size], self.weights[:self.size])
+            turnover = self._calc_signal_turnover(signal)
+        except Exception:
+            return math.nan, 0.0
+        if not math.isfinite(turnover):
+            return math.nan, 0.0
+        penalty = -max(0.0, float(turnover) - self.ri_turnover_baseline)
+        return float(turnover), float(penalty)
+
+    def _calc_signal_turnover(self, signal: Tensor) -> float:
+        if signal.ndim != 2:
+            return math.nan
+        n_days, n_stocks = int(signal.shape[0]), int(signal.shape[1])
+        if n_days <= 1 or n_stocks <= 0:
+            return math.nan
+        topk = min(self.ri_turnover_topk, n_stocks)
+        prev_hold: Optional[Set[int]] = None
+        turnovers: List[float] = []
+        stride = max(1, self.ri_turnover_step_stride)
+        for day_idx in range(0, n_days, stride):
+            day_signal = signal[day_idx]
+            finite_mask = torch.isfinite(day_signal)
+            valid_idx = torch.nonzero(finite_mask, as_tuple=False).squeeze(1)
+            if valid_idx.numel() == 0:
+                prev_hold = None
+                continue
+            day_topk = min(topk, int(valid_idx.numel()))
+            valid_scores = day_signal[valid_idx]
+            top_positions = torch.topk(valid_scores, k=day_topk, largest=True, sorted=False).indices
+            hold_idx = set(valid_idx[top_positions].detach().cpu().tolist())
+            if prev_hold is not None and prev_hold:
+                overlap = len(prev_hold & hold_idx)
+                denom = float(max(1, min(len(prev_hold), len(hold_idx))))
+                turnovers.append(1.0 - overlap / denom)
+            prev_hold = hold_idx
+        if not turnovers:
+            return math.nan
+        return float(np.mean(turnovers))
 
     def _iter_expr_nodes(self, expr: Expression):
         yield expr

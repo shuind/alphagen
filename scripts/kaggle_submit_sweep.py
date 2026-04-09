@@ -117,6 +117,10 @@ def _render_train_cell(
     ri_ast_similarity_threshold: Optional[str] = None,
     ri_corr_value_bonus: Optional[str] = None,
     ri_corr_underexplore_power: Optional[str] = None,
+    ri_turnover_weight: Optional[str] = None,
+    ri_turnover_topk: Optional[str] = None,
+    ri_turnover_baseline: Optional[str] = None,
+    ri_turnover_step_stride: Optional[str] = None,
 ) -> str:
     market = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+([^\s\\]+)\s+\d+", source, "tcsi300")
     pool = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+[^\s\\]+\s+(\d+)", source, "20")
@@ -144,6 +148,15 @@ def _render_train_cell(
         ri_corr_underexplore_power,
         "1.0",
     )
+    ri_turnover_weight_value = _choose_flag_value(source, "--ri_turnover_weight", ri_turnover_weight, "0.0")
+    ri_turnover_topk_value = _choose_flag_value(source, "--ri_turnover_topk", ri_turnover_topk, "30")
+    ri_turnover_baseline_value = _choose_flag_value(source, "--ri_turnover_baseline", ri_turnover_baseline, "0.5")
+    ri_turnover_step_stride_value = _choose_flag_value(
+        source,
+        "--ri_turnover_step_stride",
+        ri_turnover_step_stride,
+        "5",
+    )
     optimize_every = _extract_first(r"--optimize_every\s+([^\s\\]+)", source, "2")
     optimize_n_iter = _extract_first(r"--optimize_n_iter\s+([^\s\\]+)", source, "256")
     logdir = _extract_first(r"--logdir\s+([^\s\\]+)", source, "/kaggle/working/runs")
@@ -169,6 +182,10 @@ def _render_train_cell(
         f"  --ri_ast_similarity_threshold {ri_ast_similarity_threshold_value} \\",
         f"  --ri_corr_value_bonus {ri_corr_value_bonus_value} \\",
         f"  --ri_corr_underexplore_power {ri_corr_underexplore_power_value} \\",
+        f"  --ri_turnover_weight {ri_turnover_weight_value} \\",
+        f"  --ri_turnover_topk {ri_turnover_topk_value} \\",
+        f"  --ri_turnover_baseline {ri_turnover_baseline_value} \\",
+        f"  --ri_turnover_step_stride {ri_turnover_step_stride_value} \\",
         "  --profile_timing \\",
         f"  --optimize_every {optimize_every} \\",
         f"  --optimize_n_iter {optimize_n_iter} \\",
@@ -196,6 +213,10 @@ def _update_train_cell_source(
     ri_ast_similarity_threshold: Optional[str] = None,
     ri_corr_value_bonus: Optional[str] = None,
     ri_corr_underexplore_power: Optional[str] = None,
+    ri_turnover_weight: Optional[str] = None,
+    ri_turnover_topk: Optional[str] = None,
+    ri_turnover_baseline: Optional[str] = None,
+    ri_turnover_step_stride: Optional[str] = None,
 ) -> str:
     if "train_maskable_ppo.py" not in source:
         return source
@@ -212,6 +233,10 @@ def _update_train_cell_source(
         ri_ast_similarity_threshold=ri_ast_similarity_threshold,
         ri_corr_value_bonus=ri_corr_value_bonus,
         ri_corr_underexplore_power=ri_corr_underexplore_power,
+        ri_turnover_weight=ri_turnover_weight,
+        ri_turnover_topk=ri_turnover_topk,
+        ri_turnover_baseline=ri_turnover_baseline,
+        ri_turnover_step_stride=ri_turnover_step_stride,
     )
 
 
@@ -228,6 +253,10 @@ def _rewrite_notebook(
     ri_ast_similarity_threshold: Optional[str] = None,
     ri_corr_value_bonus: Optional[str] = None,
     ri_corr_underexplore_power: Optional[str] = None,
+    ri_turnover_weight: Optional[str] = None,
+    ri_turnover_topk: Optional[str] = None,
+    ri_turnover_baseline: Optional[str] = None,
+    ri_turnover_step_stride: Optional[str] = None,
 ) -> None:
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
     changed = False
@@ -250,6 +279,10 @@ def _rewrite_notebook(
             ri_ast_similarity_threshold=ri_ast_similarity_threshold,
             ri_corr_value_bonus=ri_corr_value_bonus,
             ri_corr_underexplore_power=ri_corr_underexplore_power,
+            ri_turnover_weight=ri_turnover_weight,
+            ri_turnover_topk=ri_turnover_topk,
+            ri_turnover_baseline=ri_turnover_baseline,
+            ri_turnover_step_stride=ri_turnover_step_stride,
         )
         if new_src != src:
             cell["source"] = new_src.splitlines(keepends=True)
@@ -339,6 +372,10 @@ def main() -> None:
     parser.add_argument("--ri-ast-similarity-threshold", type=str, default="")
     parser.add_argument("--ri-corr-value-bonus", type=str, default="")
     parser.add_argument("--ri-corr-underexplore-power", type=str, default="")
+    parser.add_argument("--ri-turnover-weight", type=str, default="")
+    parser.add_argument("--ri-turnover-topk", type=str, default="")
+    parser.add_argument("--ri-turnover-baseline", type=str, default="")
+    parser.add_argument("--ri-turnover-step-stride", type=str, default="")
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--state-path", type=str, default="platform_v2/runtime/kaggle_submit_state.json")
@@ -407,6 +444,10 @@ def main() -> None:
                         ri_ast_similarity_threshold=(args.ri_ast_similarity_threshold or None),
                         ri_corr_value_bonus=(args.ri_corr_value_bonus or None),
                         ri_corr_underexplore_power=(args.ri_corr_underexplore_power or None),
+                        ri_turnover_weight=(args.ri_turnover_weight or None),
+                        ri_turnover_topk=(args.ri_turnover_topk or None),
+                        ri_turnover_baseline=(args.ri_turnover_baseline or None),
+                        ri_turnover_step_stride=(args.ri_turnover_step_stride or None),
                     )
                     if args.dry_run:
                         output = "[dry-run] skipped kaggle kernels push"
