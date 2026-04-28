@@ -11,6 +11,86 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 
+LOCAL_REWARD_PATCH_MARKER = "# codex-local-reward-patch-20260428"
+
+LOCAL_REWARD_PATCH_SOURCE = r"""# codex-local-reward-patch-20260428
+from pathlib import Path
+
+
+def _replace_once(path: str, old: str, new: str) -> None:
+    p = Path(path)
+    text = p.read_text(encoding="utf-8")
+    if old in text:
+        p.write_text(text.replace(old, new, 1), encoding="utf-8")
+        return
+    if new in text:
+        return
+    raise RuntimeError(f"patch pattern not found in {path}: {old[:120]!r}")
+
+
+def _replace_all(path: str, old: str, new: str) -> None:
+    p = Path(path)
+    text = p.read_text(encoding="utf-8")
+    if old in text:
+        p.write_text(text.replace(old, new), encoding="utf-8")
+        return
+    if new in text:
+        return
+    raise RuntimeError(f"patch pattern not found in {path}: {old[:120]!r}")
+
+
+_replace_once(
+    "train_maskable_ppo.py",
+    '''choices=["re", "re+func", "re+struct", "re+reg", "re+func+struct", "re+all",
+                                 "re_v2", "re_v2+func", "re_v2+struct", "re_v2+reg", "re_v2+all"])''',
+    '''choices=["re", "re+func", "re+struct", "re+reg", "re+func+struct", "re+all",
+                                 "re+func_v2", "re+struct_v2", "re+reg_v2",
+                                 "re+struct_v2+reg_v2", "re+all_v2"])''',
+)
+
+alpha_path = "alphagen/models/alpha_pool.py"
+_replace_once(alpha_path, 'return "residual" if self.reward_mode.startswith("re_v2") else "mutual_ic"', 'return "residual" if self._use_func_v2 else "mutual_ic"')
+_replace_once(alpha_path, "ri_reg = self._calc_ri_reg_v2(expr, token_seq) if self._use_v2 and self._use_ri_reg else (", "ri_reg = self._calc_ri_reg_v2(expr, token_seq) if self._use_reg_v2 and self._use_ri_reg else (")
+_replace_once(alpha_path, '"admission_gate_enabled": bool(self.ri_admission_gate and self._use_v2),', '"admission_gate_enabled": bool(self.ri_admission_gate and self._use_any_v2),')
+_replace_once(
+    alpha_path,
+    '''    @property
+    def _use_v2(self) -> bool:
+        return self.reward_mode.startswith("re_v2")''',
+    '''    @property
+    def _use_func_v2(self) -> bool:
+        return "func_v2" in self.reward_mode or "all_v2" in self.reward_mode
+
+    @property
+    def _use_struct_v2(self) -> bool:
+        return "struct_v2" in self.reward_mode or "all_v2" in self.reward_mode
+
+    @property
+    def _use_reg_v2(self) -> bool:
+        return "reg_v2" in self.reward_mode or "all_v2" in self.reward_mode
+
+    @property
+    def _use_any_v2(self) -> bool:
+        return self._use_func_v2 or self._use_struct_v2 or self._use_reg_v2''',
+)
+_replace_once(alpha_path, "if self._use_v2:\n            reward_lambda = self.lambda_ri / (1.0 + self.ri_schedule_decay * max(self.eval_cnt, 0))", "if self._use_any_v2:\n            reward_lambda = self.lambda_ri / (1.0 + self.ri_schedule_decay * max(self.eval_cnt, 0))")
+_replace_once(alpha_path, '''        if self.reward_mode == "re_v2":
+            return re, reward_lambda
+''', "")
+_replace_once(alpha_path, "        y = candidate_value.reshape(-1).float()\n", "        y = candidate_value.reshape(-1).float()\n        target = target_value.reshape(-1).float().to(y.device)\n")
+_replace_once(alpha_path, "            y = y[sample_idx]\n", "            y = y[sample_idx]\n            target = target[sample_idx]\n")
+_replace_once(alpha_path, "        y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)\n", "        y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)\n        target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)\n")
+_replace_once(alpha_path, "        # For sampled path, metric is computed on sampled vectors to reduce memory footprint.", "        # Score the candidate's pool-orthogonal residual against the return target.")
+_replace_once(alpha_path, "                target_metric = y.detach().cpu().view(1, -1)", "                target_metric = target.detach().cpu().view(1, -1)")
+_replace_all(alpha_path, "                target_metric = y.view(1, -1)", "                target_metric = target.view(1, -1)")
+_replace_once(alpha_path, "            target_metric = y.view(1, -1)", "            target_metric = target.view(1, -1)")
+_replace_once(alpha_path, "        if self._use_v2:\n            return self._calc_ri_struct_v2(token_seq, re_value)", "        if self._use_struct_v2:\n            return self._calc_ri_struct_v2(token_seq, re_value)")
+
+print("Applied local reward patch for re+func_v2 and re+struct_v2+reg_v2.")
+!python -m py_compile train_maskable_ppo.py alphagen/models/alpha_pool.py
+"""
+
+
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -33,12 +113,17 @@ def _expand_reward_modes(
         "struct": "+struct",
         "reg": "+reg",
         "all": "+all",
+        "func_v2": "+func_v2",
+        "struct_v2": "+struct_v2",
+        "reg_v2": "+reg_v2",
+        "struct_v2_reg_v2": "+struct_v2+reg_v2",
+        "all_v2": "+all_v2",
     }
     families = _split_csv(reward_families)
     suffixes = _split_csv(reward_suffixes)
     expanded: List[str] = []
     for fam in families:
-        if fam not in {"re", "re_v2"}:
+        if fam != "re":
             raise ValueError(f"unsupported reward family: {fam}")
         for s in suffixes:
             if s not in suffix_map:
@@ -218,7 +303,7 @@ def _update_train_cell_source(
     ri_turnover_baseline: Optional[str] = None,
     ri_turnover_step_stride: Optional[str] = None,
 ) -> str:
-    if "train_maskable_ppo.py" not in source:
+    if "!python train_maskable_ppo.py" not in source:
         return source
     return _render_train_cell(
         source=source,
@@ -257,14 +342,19 @@ def _rewrite_notebook(
     ri_turnover_topk: Optional[str] = None,
     ri_turnover_baseline: Optional[str] = None,
     ri_turnover_step_stride: Optional[str] = None,
+    inject_local_reward_patch: bool = False,
 ) -> None:
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
     changed = False
+    if inject_local_reward_patch:
+        _ensure_local_reward_patch_cell(payload)
+    else:
+        _remove_local_reward_patch_cell(payload)
     for cell in payload.get("cells", []):
         if cell.get("cell_type") != "code":
             continue
         src = "".join(cell.get("source", []))
-        if "train_maskable_ppo.py" not in src:
+        if "!python train_maskable_ppo.py" not in src:
             continue
         new_src = _update_train_cell_source(
             src,
@@ -291,6 +381,46 @@ def _rewrite_notebook(
     if not changed:
         raise RuntimeError(f"no train cell updated in notebook: {notebook_path}")
     notebook_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _ensure_local_reward_patch_cell(payload: Dict) -> None:
+    cells = payload.setdefault("cells", [])
+    patch_source = LOCAL_REWARD_PATCH_SOURCE.splitlines(keepends=True)
+    for cell in cells:
+        if cell.get("cell_type") == "code" and LOCAL_REWARD_PATCH_MARKER in "".join(cell.get("source", [])):
+            cell["source"] = patch_source
+            return
+
+    insert_at = 1
+    for idx, cell in enumerate(cells):
+        if cell.get("cell_type") != "code":
+            continue
+        source = "".join(cell.get("source", []))
+        if "git checkout exp/b_sweep_v1" in source:
+            insert_at = idx + 1
+            break
+    cells.insert(
+        insert_at,
+        {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": patch_source,
+        },
+    )
+
+
+def _remove_local_reward_patch_cell(payload: Dict) -> None:
+    cells = payload.setdefault("cells", [])
+    payload["cells"] = [
+        cell
+        for cell in cells
+        if not (
+            cell.get("cell_type") == "code"
+            and LOCAL_REWARD_PATCH_MARKER in "".join(cell.get("source", []))
+        )
+    ]
 
 
 @dataclass
@@ -358,10 +488,10 @@ def main() -> None:
     parser.add_argument("--seeds", type=str, default="0,1")
     parser.add_argument("--backbones", type=str, default="lstm,transformer")
     parser.add_argument("--reward-modes", type=str, default="",
-                        help="explicit csv list, e.g. re,re+all,re_v2,re_v2+all")
-    parser.add_argument("--reward-families", type=str, default="re,re_v2",
+                        help="explicit csv list, e.g. re,re+all,re+func_v2,re+struct_v2+reg_v2,re+all_v2")
+    parser.add_argument("--reward-families", type=str, default="re",
                         help="used only when --reward-modes is empty")
-    parser.add_argument("--reward-suffixes", type=str, default="base,func,struct,reg,all",
+    parser.add_argument("--reward-suffixes", type=str, default="base,func,struct,reg,all,func_v2,struct_v2,reg_v2,struct_v2_reg_v2,all_v2",
                         help="used only when --reward-modes is empty")
     parser.add_argument("--step", type=int, default=64000)
     parser.add_argument("--ri-func-backend", type=str, default="",
@@ -378,6 +508,8 @@ def main() -> None:
     parser.add_argument("--ri-turnover-step-stride", type=str, default="")
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
+    parser.add_argument("--one-batch", action="store_true",
+                        help="submit only one batch and exit, useful when Kaggle queue capacity is limited")
     parser.add_argument("--state-path", type=str, default="platform_v2/runtime/kaggle_submit_state.json")
     parser.add_argument("--force-reset", action="store_true")
     parser.add_argument("--retry-failed", action="store_true",
@@ -385,6 +517,8 @@ def main() -> None:
     parser.add_argument("--max-push-retries", type=int, default=3)
     parser.add_argument("--push-retry-backoff-sec", type=float, default=20.0)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--inject-local-reward-patch", action="store_true",
+                        help="insert a notebook cell that patches cloned GitHub code for local reward changes")
     args = parser.parse_args()
 
     kernel_dirs = [Path(x).resolve() for x in _split_csv(args.kernel_dirs)]
@@ -448,6 +582,7 @@ def main() -> None:
                         ri_turnover_topk=(args.ri_turnover_topk or None),
                         ri_turnover_baseline=(args.ri_turnover_baseline or None),
                         ri_turnover_step_stride=(args.ri_turnover_step_stride or None),
+                        inject_local_reward_patch=bool(args.inject_local_reward_patch),
                     )
                     if args.dry_run:
                         output = "[dry-run] skipped kaggle kernels push"
@@ -474,6 +609,11 @@ def main() -> None:
                     job["error"] = str(e)
                     print(f"    [failed] {job['job_id']} -> {e}")
                 _save_state(state_path, state)
+
+            if args.one_batch:
+                remaining = len(_runnable_indices(state, args.retry_failed))
+                print(f"[stop] one_batch=True, remaining={remaining}, state saved: {state_path}")
+                break
 
             if _runnable_indices(state, args.retry_failed):
                 sleep_sec = max(1.0, args.interval_minutes * 60.0)

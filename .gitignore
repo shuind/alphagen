@@ -20,6 +20,10 @@ platform_v2/
 
 # Platform build/runtime artifacts
 platform_runtime/
+platform/.next/
+platform/node_modules/
+platform/backend/runtime/
+platform/backend/**/__pycache__/
 platform_v2/runtime/
 platform_v2/frontend/node_modules/
 platform_v2/frontend/dist/
@@ -39,3 +43,30 @@ tb_log/
 context_outputs/
 *.pt
 *.pth
+
+
+app/
+components.json
+components/
+hooks/
+lib/
+next-env.d.ts
+next.config.mjs
+package.json
+platform/
+pnpm-lock.yaml
+postcss.config.mjs
+public/
+reports/mechanism_validation_20260408.md
+scripts/build_final_thesis.py
+scripts/mechanism_validate_rewards.py
+scripts/visualize_mechanism_trajectory.py
+styles/
+thesis_materials/
+thesis_output/
+tsconfig.json
+
+# Local thesis reference files
+内容仅供参考.docx
+山东大学毕业论文封面（A4）.doc
+附件1：《山东大学本科毕业论文（设计）撰写规范》.pdf

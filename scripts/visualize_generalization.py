@@ -27,7 +27,7 @@ def _read_json(path: Path) -> Dict:
 
 
 def _parse_run_id(run_id: str) -> Dict[str, str]:
-    # Example: b_seed0_lstm_re_v2+func_20260331130957_20260331051219
+    # Example: b_seed0_lstm_re+func_v2_20260331130957_20260331051219
     m = re.match(r"^b_seed(?P<seed>\d+)_(?P<backbone>lstm|transformer)_(?P<reward>.+)_\d{14}_\d{14}$", run_id)
     if not m:
         return {"seed": "", "backbone": "", "reward_mode": ""}

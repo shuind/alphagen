@@ -713,7 +713,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--re_mode", type=str, default="ensemble", choices=["ensemble", "delta_best"])
     parser.add_argument("--reward_mode", type=str, default="re",
                         choices=["re", "re+func", "re+struct", "re+reg", "re+func+struct", "re+all",
-                                 "re_v2", "re_v2+func", "re_v2+struct", "re_v2+reg", "re_v2+all"])
+                                 "re+func_v2", "re+struct_v2", "re+reg_v2",
+                                 "re+struct_v2+reg_v2", "re+all_v2"])
     parser.add_argument("--lambda_ri", type=float, default=0.0)
     parser.add_argument("--ri_func_weight", type=float, default=1.0)
     parser.add_argument("--ri_struct_weight", type=float, default=1.0)

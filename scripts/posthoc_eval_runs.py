@@ -58,7 +58,7 @@ def _parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--runs-root", required=True, type=str)
-    parser.add_argument("--run-id", type=str, default="")
+    parser.add_argument("--run-id", type=str, default="", help="single run id or comma-separated run ids")
     parser.add_argument("--provider-uri", type=str, default="")
     parser.add_argument("--market", type=str, default="csi300")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
@@ -1116,7 +1116,7 @@ def main() -> None:
         raise FileNotFoundError(f"runs root not found: {runs_root}")
 
     if args.run_id:
-        run_ids = [args.run_id]
+        run_ids = [item.strip() for item in args.run_id.split(",") if item.strip()]
     else:
         run_ids = _list_run_ids(runs_root)
         if not run_ids:

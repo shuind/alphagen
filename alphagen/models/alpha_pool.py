@@ -324,7 +324,7 @@ class AlphaPool(AlphaPoolBase):
     def _resolve_ri_func_backend(self, backend: str) -> str:
         backend = str(backend or "auto")
         if backend == "auto":
-            return "residual" if self.reward_mode.startswith("re_v2") else "mutual_ic"
+            return "residual" if self._use_func_v2 else "mutual_ic"
         return backend
     def try_new_expr(self, expr: Expression, token_seq: Optional[List[str]] = None) -> Tuple[float, Dict]:
         t_try0 = time.perf_counter()
@@ -356,7 +356,7 @@ class AlphaPool(AlphaPoolBase):
             ri_func, ri_func_info, corr_cluster_pending = self._calc_ri_func_dispatch(expr, ic_mut, expr_ast_feature)
         self._record_timing("ri_func_sec", time.perf_counter() - t0)
         t0 = time.perf_counter()
-        ri_reg = self._calc_ri_reg_v2(expr, token_seq) if self._use_v2 and self._use_ri_reg else (
+        ri_reg = self._calc_ri_reg_v2(expr, token_seq) if self._use_reg_v2 and self._use_ri_reg else (
             self._calc_ri_reg(token_seq) if self._use_ri_reg else 0.0
         )
         self._record_timing("ri_reg_sec", time.perf_counter() - t0)
@@ -429,7 +429,7 @@ class AlphaPool(AlphaPoolBase):
             "optimize_executed": bool(optimize_executed),
             "optimize_every": int(self.optimize_every),
             "optimize_n_iter": int(self.optimize_n_iter),
-            "admission_gate_enabled": bool(self.ri_admission_gate and self._use_v2),
+            "admission_gate_enabled": bool(self.ri_admission_gate and self._use_any_v2),
             "admission_gate_passed": bool((not self.ri_admission_gate) or (re > 0)),
         }
         if isinstance(getattr(self, "_ri_func_timing", None), dict):
@@ -607,8 +607,20 @@ class AlphaPool(AlphaPoolBase):
         return "reg" in self.reward_mode or "all" in self.reward_mode
 
     @property
-    def _use_v2(self) -> bool:
-        return self.reward_mode.startswith("re_v2")
+    def _use_func_v2(self) -> bool:
+        return "func_v2" in self.reward_mode or "all_v2" in self.reward_mode
+
+    @property
+    def _use_struct_v2(self) -> bool:
+        return "struct_v2" in self.reward_mode or "all_v2" in self.reward_mode
+
+    @property
+    def _use_reg_v2(self) -> bool:
+        return "reg_v2" in self.reward_mode or "all_v2" in self.reward_mode
+
+    @property
+    def _use_any_v2(self) -> bool:
+        return self._use_func_v2 or self._use_struct_v2 or self._use_reg_v2
 
     def _compose_re(self, ic_ensemble: float, increment: float) -> float:
         if self.re_mode == "delta_best":
@@ -623,11 +635,9 @@ class AlphaPool(AlphaPoolBase):
         ri_reg: float
     ) -> Tuple[float, float]:
         reward_lambda = self.lambda_ri
-        if self._use_v2:
+        if self._use_any_v2:
             reward_lambda = self.lambda_ri / (1.0 + self.ri_schedule_decay * max(self.eval_cnt, 0))
         if self.reward_mode == "re":
-            return re, reward_lambda
-        if self.reward_mode == "re_v2":
             return re, reward_lambda
         ri_sum = 0.0
         if self._use_ri_func:
@@ -681,31 +691,34 @@ class AlphaPool(AlphaPoolBase):
         t2 = time.perf_counter()
         x = pool_values.permute(1, 2, 0).reshape(-1, used_k).float()
         y = candidate_value.reshape(-1).float()
+        target = target_value.reshape(-1).float().to(y.device)
         used_sample = 0
         if self.ri_func_sample_size > 0 and x.shape[0] > self.ri_func_sample_size:
             sample_idx = torch.randperm(x.shape[0], device=x.device)[: self.ri_func_sample_size]
             x = x[sample_idx]
             y = y[sample_idx]
+            target = target[sample_idx]
             used_sample = int(self.ri_func_sample_size)
         else:
             used_sample = int(x.shape[0])
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+        target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
         beta = torch.linalg.lstsq(x, y).solution
         t3 = time.perf_counter()
         resid_flat = y - x @ beta
-        # For sampled path, metric is computed on sampled vectors to reduce memory footprint.
+        # Score the candidate's pool-orthogonal residual against the return target.
         if self.ri_func_metric == "rankic":
             if self.ri_func_rankic_on_cpu:
                 resid_metric = resid_flat.detach().cpu().view(1, -1)
-                target_metric = y.detach().cpu().view(1, -1)
+                target_metric = target.detach().cpu().view(1, -1)
             else:
                 resid_metric = resid_flat.view(1, -1)
-                target_metric = y.view(1, -1)
+                target_metric = target.view(1, -1)
             metric = batch_spearmanr(resid_metric, target_metric)
         else:
             resid_metric = resid_flat.view(1, -1)
-            target_metric = y.view(1, -1)
+            target_metric = target.view(1, -1)
             metric = batch_pearsonr(resid_metric, target_metric)
         t4 = time.perf_counter()
         self._ri_func_timing = {
@@ -830,7 +843,7 @@ class AlphaPool(AlphaPoolBase):
     ) -> Tuple[float, Dict[str, Any]]:
         if self.ri_struct_backend == "ast_cluster":
             return self._calc_ri_struct_ast_v2(expr, expr_ast_feature, re_value)
-        if self._use_v2:
+        if self._use_struct_v2:
             return self._calc_ri_struct_v2(token_seq, re_value)
         return self._calc_ri_struct(token_seq), {
             "cluster_id": -1,

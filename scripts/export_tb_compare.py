@@ -71,7 +71,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tb-root", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--reward-modes", default="re,re_v2+all")
+    parser.add_argument("--reward-modes", default="re,re+all_v2")
     parser.add_argument("--tags", default=",".join(DEFAULT_TAGS))
     parser.add_argument("--keep-latest-only", action="store_true", default=True)
     args = parser.parse_args()
