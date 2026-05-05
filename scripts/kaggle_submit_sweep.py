@@ -195,6 +195,7 @@ def _render_train_cell(
     backbone: str,
     reward_mode: str,
     step: int,
+    pool: Optional[int],
     run_name: str,
     ri_func_backend: Optional[str] = None,
     ri_struct_backend: Optional[str] = None,
@@ -208,7 +209,11 @@ def _render_train_cell(
     ri_turnover_step_stride: Optional[str] = None,
 ) -> str:
     market = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+([^\s\\]+)\s+\d+", source, "tcsi300")
-    pool = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+[^\s\\]+\s+(\d+)", source, "20")
+    pool_value = str(pool) if pool is not None else _extract_first(
+        r"train_maskable_ppo\.py\s+\d+\s+[^\s\\]+\s+(\d+)",
+        source,
+        "20",
+    )
     lambda_ri = _extract_first(r"--lambda_ri\s+([^\s\\]+)", source, "0.3")
     ri_func_weight = _extract_first(r"--ri_func_weight\s+([^\s\\]+)", source, "1.0")
     ri_struct_weight = _extract_first(r"--ri_struct_weight\s+([^\s\\]+)", source, "0.3")
@@ -250,7 +255,7 @@ def _render_train_cell(
     provider_uri = _extract_first(r"--provider_uri\s+([^\s\\]+)", source, "")
 
     lines = [
-        f"!python train_maskable_ppo.py {seed} {market} {pool} --step {step} \\",
+        f"!python train_maskable_ppo.py {seed} {market} {pool_value} --step {step} \\",
         f"  --backbone {backbone} \\",
         f"  --reward_mode {reward_mode} \\",
         f"  --lambda_ri {lambda_ri} \\",
@@ -291,6 +296,7 @@ def _update_train_cell_source(
     backbone: str,
     reward_mode: str,
     step: int,
+    pool: Optional[int],
     run_name: str,
     ri_func_backend: Optional[str] = None,
     ri_struct_backend: Optional[str] = None,
@@ -311,6 +317,7 @@ def _update_train_cell_source(
         backbone=backbone,
         reward_mode=reward_mode,
         step=step,
+        pool=pool,
         run_name=run_name,
         ri_func_backend=ri_func_backend,
         ri_struct_backend=ri_struct_backend,
@@ -331,6 +338,7 @@ def _rewrite_notebook(
     backbone: str,
     reward_mode: str,
     step: int,
+    pool: Optional[int],
     run_name: str,
     ri_func_backend: Optional[str] = None,
     ri_struct_backend: Optional[str] = None,
@@ -362,6 +370,7 @@ def _rewrite_notebook(
             backbone,
             reward_mode,
             step,
+            pool,
             run_name,
             ri_func_backend=ri_func_backend,
             ri_struct_backend=ri_struct_backend,
@@ -493,6 +502,8 @@ def main() -> None:
                         help="used only when --reward-modes is empty")
     parser.add_argument("--reward-suffixes", type=str, default="base,func,struct,reg,all,func_v2,struct_v2,reg_v2,struct_v2_reg_v2,all_v2",
                         help="used only when --reward-modes is empty")
+    parser.add_argument("--pool", type=int, default=None,
+                        help="override train_maskable_ppo pool capacity; empty keeps the notebook value")
     parser.add_argument("--step", type=int, default=64000)
     parser.add_argument("--ri-func-backend", type=str, default="",
                         choices=["", "auto", "mutual_ic", "residual", "corr_cluster"])
@@ -562,7 +573,8 @@ def main() -> None:
                     if args.notebook_file
                     else _detect_notebook_file(kernel_dir)
                 )
-                run_name = f"b_seed{job['seed']}_{job['backbone']}_{job['reward_mode']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                pool_tag = f"p{args.pool}_" if args.pool is not None else ""
+                run_name = f"b_{pool_tag}seed{job['seed']}_{job['backbone']}_{job['reward_mode']}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 print(f"  [job] {job['job_id']} -> kernel_dir={kernel_dir.name}")
                 try:
                     _rewrite_notebook(
@@ -571,6 +583,7 @@ def main() -> None:
                         backbone=str(job["backbone"]),
                         reward_mode=str(job["reward_mode"]),
                         step=int(args.step),
+                        pool=args.pool,
                         run_name=run_name,
                         ri_func_backend=(args.ri_func_backend or None),
                         ri_struct_backend=(args.ri_struct_backend or None),
