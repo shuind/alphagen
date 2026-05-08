@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+from collections import Counter
 from datetime import datetime
 from typing import Optional
 
@@ -14,7 +15,9 @@ from alphagen.utils.random import reseed_everything
 from alphagen_qlib.calculator import QLibStockDataCalculator
 from alphagen_qlib.compat import patch_all
 from alphagen_qlib.stock_data import FeatureType, StockData
+from new.classic_factors import load_classic_factors
 from new.env import MultiHeadAlphaEnv
+from new.head_pretrain import pretrain_policy_heads
 from new.policy import MultiHeadMaskablePolicy, MultiHeadTransformerFeatures
 from new.pool import MultiHeadAlphaPool
 from train_maskable_ppo import CustomCallback
@@ -44,6 +47,14 @@ def main(
     ts_bias: float = 0.5,
     optimize_every: int = 2,
     optimize_n_iter: int = 256,
+    head_pretrain_epochs: int = 20,
+    head_pretrain_lr: float = 1e-3,
+    head_pretrain_batch_size: int = 128,
+    classic_factor_csv: str = "",
+    no_head_pretrain: bool = False,
+    save_pretrain_ckpt: bool = False,
+    pretrain_ckpt_path: str = "",
+    load_pretrain_ckpt: str = "",
     save_model_ckpt: bool = False,
     reward_per_step: float = REWARD_PER_STEP,
     run_name: str = "",
@@ -149,43 +160,68 @@ def main(
     os.makedirs(tb_run_dir, exist_ok=True)
     os.makedirs(run_root_dir, exist_ok=True)
 
-    with open(os.path.join(run_root_dir, "run_meta.json"), "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "run_id": run_id,
-                "market": market,
-                "seed": seed,
-                "pool_capacity": pool_capacity,
-                "steps": steps,
-                "method": method,
-                "backbone": "shared_transformer",
-                "reward_mode": "re",
-                "intrinsic_beta": beta,
-                "simple_bias": simple_bias,
-                "ts_bias": ts_bias,
-                "optimize_every": optimize_every,
-                "optimize_n_iter": optimize_n_iter,
-                "provider_uri": resolved_provider_uri,
-                "train_start_time": train_start_time,
-                "train_end_time": train_end_time,
-                "train_start_year": int(train_start_time[:4]),
-                "train_end_year": int(train_end_time[:4]),
-                "valid_start_time": valid_start_time,
-                "valid_end_time": valid_end_time,
-                "test_start_time": test_start_time,
-                "test_end_time": test_end_time,
-                "stockdata_max_backtrack_days": max_backtrack_days,
-                "stockdata_max_future_days": max_future_days,
-                "target_expression": "Ref($close,-20)/$close-1",
-                "ckpt_run_dir": ckpt_run_dir,
-                "tb_run_dir": tb_run_dir,
-                "run_root_dir": run_root_dir,
-                "timestamp": timestamp,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
+    if load_pretrain_ckpt and not os.path.exists(load_pretrain_ckpt):
+        raise FileNotFoundError(f"pretrain checkpoint not found: {load_pretrain_ckpt}")
+
+    head_pretrain_enabled = (
+        method != "single_transformer"
+        and not bool(no_head_pretrain)
+        and int(head_pretrain_epochs) > 0
+        and not bool(load_pretrain_ckpt)
+    )
+    classic_factors = []
+    skipped_classic_factors = []
+    if method != "single_transformer" and not bool(no_head_pretrain) and not bool(load_pretrain_ckpt):
+        classic_factors, skipped_classic_factors = load_classic_factors(classic_factor_csv)
+        print(
+            "[classic-factors] "
+            f"loaded={len(classic_factors)} skipped={len(skipped_classic_factors)} "
+            f"heads={dict(Counter(f.head for f in classic_factors))}"
         )
+
+    run_meta = {
+        "run_id": run_id,
+        "market": market,
+        "seed": seed,
+        "pool_capacity": pool_capacity,
+        "steps": steps,
+        "method": method,
+        "backbone": "shared_transformer",
+        "reward_mode": "re",
+        "intrinsic_beta": beta,
+        "simple_bias": simple_bias,
+        "ts_bias": ts_bias,
+        "optimize_every": optimize_every,
+        "optimize_n_iter": optimize_n_iter,
+        "head_pretrain_enabled": head_pretrain_enabled,
+        "head_pretrain_epochs": int(head_pretrain_epochs),
+        "head_pretrain_lr": float(head_pretrain_lr),
+        "head_pretrain_batch_size": int(head_pretrain_batch_size),
+        "classic_factor_csv": classic_factor_csv,
+        "save_pretrain_ckpt": bool(save_pretrain_ckpt),
+        "pretrain_ckpt_path": pretrain_ckpt_path,
+        "load_pretrain_ckpt": load_pretrain_ckpt,
+        "classic_factor_count": len(classic_factors),
+        "classic_factor_skipped_count": len(skipped_classic_factors),
+        "classic_factor_head_counts": dict(Counter(f.head for f in classic_factors)),
+        "classic_factor_skipped": [s.__dict__ for s in skipped_classic_factors[:20]],
+        "provider_uri": resolved_provider_uri,
+        "train_start_time": train_start_time,
+        "train_end_time": train_end_time,
+        "train_start_year": int(train_start_time[:4]),
+        "train_end_year": int(train_end_time[:4]),
+        "valid_start_time": valid_start_time,
+        "valid_end_time": valid_end_time,
+        "test_start_time": test_start_time,
+        "test_end_time": test_end_time,
+        "stockdata_max_backtrack_days": max_backtrack_days,
+        "stockdata_max_future_days": max_future_days,
+        "target_expression": "Ref($close,-20)/$close-1",
+        "ckpt_run_dir": ckpt_run_dir,
+        "tb_run_dir": tb_run_dir,
+        "run_root_dir": run_root_dir,
+        "timestamp": timestamp,
+    }
 
     callback = CustomCallback(
         save_freq=10000,
@@ -223,6 +259,59 @@ def main(
         device=torch_device,
         verbose=verbose,
     )
+
+    if load_pretrain_ckpt:
+        print(f"[head-pretrain] loading checkpoint: {load_pretrain_ckpt}")
+        loaded_model = MaskablePPO.load(
+            load_pretrain_ckpt,
+            env=env,
+            device=torch_device,
+            tensorboard_log=tb_run_dir,
+        )
+        model.policy.load_state_dict(loaded_model.policy.state_dict())
+        pretrain_summary = {
+            "enabled": False,
+            "loaded": True,
+            "loaded_path": load_pretrain_ckpt,
+            "epochs": 0,
+            "factor_count": 0,
+            "sample_count": 0,
+            "loss_start": None,
+            "loss_end": None,
+            "losses": [],
+        }
+    elif head_pretrain_enabled:
+        pretrain_summary = pretrain_policy_heads(
+            model=model,
+            factors=classic_factors,
+            epochs=int(head_pretrain_epochs),
+            lr=float(head_pretrain_lr),
+            batch_size=int(head_pretrain_batch_size),
+            seed=int(seed),
+        )
+    else:
+        pretrain_summary = {
+            "enabled": False,
+            "epochs": int(head_pretrain_epochs),
+            "factor_count": len(classic_factors),
+            "sample_count": 0,
+            "loss_start": None,
+            "loss_end": None,
+            "losses": [],
+        }
+    if save_pretrain_ckpt:
+        resolved_pretrain_ckpt_path = pretrain_ckpt_path or os.path.join(ckpt_run_dir, "pretrained_policy.zip")
+        pretrain_parent = os.path.dirname(resolved_pretrain_ckpt_path)
+        if pretrain_parent:
+            os.makedirs(pretrain_parent, exist_ok=True)
+        model.save(resolved_pretrain_ckpt_path)
+        pretrain_summary["saved"] = True
+        pretrain_summary["saved_path"] = resolved_pretrain_ckpt_path
+        run_meta["pretrain_ckpt_path"] = resolved_pretrain_ckpt_path
+        print(f"[head-pretrain] saved checkpoint: {resolved_pretrain_ckpt_path}")
+    run_meta["head_pretrain_summary"] = pretrain_summary
+    with open(os.path.join(run_root_dir, "run_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(run_meta, f, ensure_ascii=False, indent=2)
     model.learn(total_timesteps=steps, callback=callback, tb_log_name=run_id)
 
 
@@ -241,6 +330,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ts-bias", type=float, default=0.5)
     parser.add_argument("--optimize_every", type=int, default=2)
     parser.add_argument("--optimize_n_iter", type=int, default=256)
+    parser.add_argument("--head-pretrain-epochs", type=int, default=20)
+    parser.add_argument("--head-pretrain-lr", type=float, default=1e-3)
+    parser.add_argument("--head-pretrain-batch-size", type=int, default=128)
+    parser.add_argument("--classic-factor-csv", type=str, default="")
+    parser.add_argument("--no-head-pretrain", action="store_true")
+    parser.add_argument("--save-pretrain-ckpt", action="store_true")
+    parser.add_argument("--pretrain-ckpt-path", type=str, default="")
+    parser.add_argument("--load-pretrain-ckpt", type=str, default="")
     parser.add_argument("--save_model_ckpt", action="store_true")
     parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
     parser.add_argument("--run_name", type=str, default="")
@@ -273,6 +370,14 @@ if __name__ == "__main__":
         ts_bias=args.ts_bias,
         optimize_every=args.optimize_every,
         optimize_n_iter=args.optimize_n_iter,
+        head_pretrain_epochs=args.head_pretrain_epochs,
+        head_pretrain_lr=args.head_pretrain_lr,
+        head_pretrain_batch_size=args.head_pretrain_batch_size,
+        classic_factor_csv=args.classic_factor_csv,
+        no_head_pretrain=args.no_head_pretrain,
+        save_pretrain_ckpt=args.save_pretrain_ckpt,
+        pretrain_ckpt_path=args.pretrain_ckpt_path,
+        load_pretrain_ckpt=args.load_pretrain_ckpt,
         save_model_ckpt=args.save_model_ckpt,
         reward_per_step=args.reward_per_step,
         run_name=args.run_name,
@@ -283,4 +388,3 @@ if __name__ == "__main__":
         device=args.device,
         verbose=args.verbose,
     )
-

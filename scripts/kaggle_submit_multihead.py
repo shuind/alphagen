@@ -130,16 +130,39 @@ def _render_train_cell(
     ts_bias: float,
     optimize_every: int,
     optimize_n_iter: int,
+    head_pretrain_epochs: int,
+    head_pretrain_lr: float,
+    head_pretrain_batch_size: int,
+    classic_factor_csv: str,
+    no_head_pretrain: bool,
+    save_pretrain_ckpt: bool,
+    pretrain_ckpt_path: str,
+    load_pretrain_ckpt: str,
 ) -> str:
-    return "\n".join(
+    lines = [
+        f"!python -m new.train_multihead_ppo {seed} {market} {pool} --step {step} \\",
+        f"  --method {method} \\",
+        f"  --intrinsic-beta {intrinsic_beta} \\",
+        f"  --simple-bias {simple_bias} \\",
+        f"  --ts-bias {ts_bias} \\",
+        f"  --optimize_every {optimize_every} \\",
+        f"  --optimize_n_iter {optimize_n_iter} \\",
+        f"  --head-pretrain-epochs {head_pretrain_epochs} \\",
+        f"  --head-pretrain-lr {head_pretrain_lr} \\",
+        f"  --head-pretrain-batch-size {head_pretrain_batch_size} \\",
+    ]
+    if classic_factor_csv:
+        lines.append(f"  --classic-factor-csv {json.dumps(classic_factor_csv)} \\")
+    if no_head_pretrain:
+        lines.append("  --no-head-pretrain \\")
+    if save_pretrain_ckpt:
+        lines.append("  --save-pretrain-ckpt \\")
+    if pretrain_ckpt_path:
+        lines.append(f"  --pretrain-ckpt-path {json.dumps(pretrain_ckpt_path)} \\")
+    if load_pretrain_ckpt:
+        lines.append(f"  --load-pretrain-ckpt {json.dumps(load_pretrain_ckpt)} \\")
+    lines.extend(
         [
-            f"!python -m new.train_multihead_ppo {seed} {market} {pool} --step {step} \\",
-            f"  --method {method} \\",
-            f"  --intrinsic-beta {intrinsic_beta} \\",
-            f"  --simple-bias {simple_bias} \\",
-            f"  --ts-bias {ts_bias} \\",
-            f"  --optimize_every {optimize_every} \\",
-            f"  --optimize_n_iter {optimize_n_iter} \\",
             "  --logdir /kaggle/working/runs \\",
             "  --ckpt_dir /kaggle/working/checkpoints \\",
             "  --tb_dir /kaggle/working/tb_log \\",
@@ -147,6 +170,7 @@ def _render_train_cell(
             "",
         ]
     )
+    return "\n".join(lines)
 
 
 def _rewrite_notebook(
@@ -163,6 +187,14 @@ def _rewrite_notebook(
     ts_bias: float,
     optimize_every: int,
     optimize_n_iter: int,
+    head_pretrain_epochs: int,
+    head_pretrain_lr: float,
+    head_pretrain_batch_size: int,
+    classic_factor_csv: str,
+    no_head_pretrain: bool,
+    save_pretrain_ckpt: bool,
+    pretrain_ckpt_path: str,
+    load_pretrain_ckpt: str,
 ) -> None:
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
     _ensure_new_package_cell(payload, files)
@@ -193,6 +225,14 @@ def _rewrite_notebook(
         ts_bias=ts_bias,
         optimize_every=optimize_every,
         optimize_n_iter=optimize_n_iter,
+        head_pretrain_epochs=head_pretrain_epochs,
+        head_pretrain_lr=head_pretrain_lr,
+        head_pretrain_batch_size=head_pretrain_batch_size,
+        classic_factor_csv=classic_factor_csv,
+        no_head_pretrain=no_head_pretrain,
+        save_pretrain_ckpt=save_pretrain_ckpt,
+        pretrain_ckpt_path=pretrain_ckpt_path,
+        load_pretrain_ckpt=load_pretrain_ckpt,
     )
     train_cell = {
         "cell_type": "code",
@@ -279,6 +319,14 @@ def main() -> None:
     parser.add_argument("--ts-bias", type=float, default=0.5)
     parser.add_argument("--optimize-every", type=int, default=2)
     parser.add_argument("--optimize-n-iter", type=int, default=256)
+    parser.add_argument("--head-pretrain-epochs", type=int, default=20)
+    parser.add_argument("--head-pretrain-lr", type=float, default=1e-3)
+    parser.add_argument("--head-pretrain-batch-size", type=int, default=128)
+    parser.add_argument("--classic-factor-csv", default="")
+    parser.add_argument("--no-head-pretrain", action="store_true")
+    parser.add_argument("--save-pretrain-ckpt", action="store_true")
+    parser.add_argument("--pretrain-ckpt-path", default="")
+    parser.add_argument("--load-pretrain-ckpt", default="")
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--one-batch", action="store_true")
@@ -353,6 +401,14 @@ def main() -> None:
                         ts_bias=float(args.ts_bias),
                         optimize_every=int(args.optimize_every),
                         optimize_n_iter=int(args.optimize_n_iter),
+                        head_pretrain_epochs=int(args.head_pretrain_epochs),
+                        head_pretrain_lr=float(args.head_pretrain_lr),
+                        head_pretrain_batch_size=int(args.head_pretrain_batch_size),
+                        classic_factor_csv=str(args.classic_factor_csv),
+                        no_head_pretrain=bool(args.no_head_pretrain),
+                        save_pretrain_ckpt=bool(args.save_pretrain_ckpt),
+                        pretrain_ckpt_path=str(args.pretrain_ckpt_path),
+                        load_pretrain_ckpt=str(args.load_pretrain_ckpt),
                     )
                     if args.dry_run:
                         output = "[dry-run] skipped kaggle kernels push"

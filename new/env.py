@@ -23,7 +23,7 @@ from alphagen.rl.env.wrapper import (
 )
 
 
-HEAD_NAMES = ("base", "simple", "ts", "explore")
+HEAD_NAMES = ("base", "simple", "ts", "pv", "rank", "explore")
 HEAD_TO_ID = {name: idx for idx, name in enumerate(HEAD_NAMES)}
 
 

@@ -87,7 +87,14 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
         self.head_names = tuple(HEAD_NAMES)
         self.simple_bias = float(simple_bias)
         self.ts_bias = float(ts_bias)
-        self.temperatures_cfg = temperatures or {"base": 1.0, "simple": 0.9, "ts": 1.0, "explore": 1.3}
+        self.temperatures_cfg = temperatures or {
+            "base": 1.0,
+            "simple": 0.9,
+            "ts": 1.0,
+            "pv": 1.0,
+            "rank": 1.0,
+            "explore": 1.3,
+        }
         super().__init__(
             observation_space=observation_space,
             action_space=action_space,
@@ -145,6 +152,8 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
         bias = th.zeros((len(self.head_names), action_dim), dtype=th.float32)
         complex_ops = {"Corr", "Cov", "Div", "Log", "Std", "Var", "Mad"}
         ts_ops = {"Ref", "Delta", "Mean", "Std", "Corr", "Cov", "WMA", "EMA", "Sum"}
+        pv_ops = {"Mul", "Div", "Corr", "Cov", "Mean", "Sum"}
+        rank_ops = {"Greater", "Less", "Max", "Min"}
         for idx, op in enumerate(OPERATORS):
             action_idx = OFFSET_OP + idx - 1
             if action_idx < 0 or action_idx >= action_dim:
@@ -154,6 +163,10 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
                 bias[self.head_names.index("simple"), action_idx] -= self.simple_bias
             if name in ts_ops:
                 bias[self.head_names.index("ts"), action_idx] += self.ts_bias
+            if "pv" in self.head_names and name in pv_ops:
+                bias[self.head_names.index("pv"), action_idx] += 0.25
+            if "rank" in self.head_names and name in rank_ops:
+                bias[self.head_names.index("rank"), action_idx] += 0.35
         return bias
 
     def _head_ids(self, obs: th.Tensor) -> th.Tensor:
@@ -173,6 +186,16 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
 
     def _values_from_obs_latent(self, obs: th.Tensor, latent_vf: th.Tensor) -> th.Tensor:
         return self._select_by_head(self.value_nets, latent_vf, self._head_ids(obs))
+
+    def get_action_logits(self, obs: th.Tensor) -> th.Tensor:
+        features = self.extract_features(obs)
+        if not self.share_features_extractor:
+            features = features[0]
+        latent_pi = self.mlp_extractor.forward_actor(features)
+        head_ids = self._head_ids(obs)
+        logits = self._select_by_head(self.action_nets, latent_pi, head_ids)
+        logits = logits + self.head_bias[head_ids]
+        return logits / self.head_temperature[head_ids].unsqueeze(1).clamp_min(1e-6)
 
     def forward(
         self,
@@ -214,11 +237,8 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
         return self._values_from_obs_latent(obs, latent_vf), distribution.log_prob(actions), distribution.entropy()
 
     def get_distribution(self, obs: th.Tensor, action_masks: Optional[np.ndarray] = None) -> MaskableDistribution:
-        features = self.extract_features(obs)
-        if not self.share_features_extractor:
-            features = features[0]
-        latent_pi = self.mlp_extractor.forward_actor(features)
-        distribution = self._dist_from_obs_latent(obs, latent_pi)
+        logits = self.get_action_logits(obs)
+        distribution = self.action_dist.proba_distribution(action_logits=logits)
         if action_masks is not None:
             distribution.apply_masking(action_masks)
         return distribution
