@@ -142,6 +142,10 @@ def _render_train_cell(
     save_pretrain_ckpt: bool,
     pretrain_ckpt_path: str,
     load_pretrain_ckpt: str,
+    motif_max_edits: int,
+    motif_prior_eta: float,
+    behavior_novelty_beta: float,
+    behavior_archive_size: int,
 ) -> str:
     lines = [
         f"!python -m new.train_multihead_ppo {seed} {market} {pool} --step {step} \\",
@@ -156,6 +160,10 @@ def _render_train_cell(
         f"  --head-pretrain-batch-size {head_pretrain_batch_size} \\",
         f"  --classic-factor-bank {classic_factor_bank} \\",
         f"  --pretrain-loss-weights {json.dumps(pretrain_loss_weights)} \\",
+        f"  --motif-max-edits {motif_max_edits} \\",
+        f"  --motif-prior-eta {motif_prior_eta} \\",
+        f"  --behavior-novelty-beta {behavior_novelty_beta} \\",
+        f"  --behavior-archive-size {behavior_archive_size} \\",
     ]
     if classic_factor_augment:
         lines.append("  --classic-factor-augment \\")
@@ -211,6 +219,10 @@ def _rewrite_notebook(
     save_pretrain_ckpt: bool,
     pretrain_ckpt_path: str,
     load_pretrain_ckpt: str,
+    motif_max_edits: int,
+    motif_prior_eta: float,
+    behavior_novelty_beta: float,
+    behavior_archive_size: int,
 ) -> None:
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
     _ensure_new_package_cell(payload, files)
@@ -253,6 +265,10 @@ def _rewrite_notebook(
         save_pretrain_ckpt=save_pretrain_ckpt,
         pretrain_ckpt_path=pretrain_ckpt_path,
         load_pretrain_ckpt=load_pretrain_ckpt,
+        motif_max_edits=motif_max_edits,
+        motif_prior_eta=motif_prior_eta,
+        behavior_novelty_beta=behavior_novelty_beta,
+        behavior_archive_size=behavior_archive_size,
     )
     train_cell = {
         "cell_type": "code",
@@ -329,7 +345,7 @@ def main() -> None:
     parser.add_argument(
         "--methods",
         default="single_transformer,multihead,multihead_intrinsic",
-        help="csv: single_transformer,multihead,multihead_intrinsic",
+        help="csv: single_transformer,multihead,multihead_intrinsic,motif_edit,motif_edit_intrinsic",
     )
     parser.add_argument("--market", default="tcsi300")
     parser.add_argument("--pool", type=int, default=10)
@@ -353,6 +369,10 @@ def main() -> None:
     parser.add_argument("--save-pretrain-ckpt", action="store_true")
     parser.add_argument("--pretrain-ckpt-path", default="")
     parser.add_argument("--load-pretrain-ckpt", default="")
+    parser.add_argument("--motif-max-edits", type=int, default=4)
+    parser.add_argument("--motif-prior-eta", type=float, default=0.02)
+    parser.add_argument("--behavior-novelty-beta", type=float, default=0.05)
+    parser.add_argument("--behavior-archive-size", type=int, default=128)
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--one-batch", action="store_true")
@@ -374,7 +394,7 @@ def main() -> None:
     files = _load_new_package_files(Path(args.new_dir).resolve())
     seeds = [int(x) for x in _split_csv(args.seeds)]
     methods = _split_csv(args.methods)
-    allowed_methods = {"single_transformer", "multihead", "multihead_intrinsic"}
+    allowed_methods = {"single_transformer", "multihead", "multihead_intrinsic", "motif_edit", "motif_edit_intrinsic"}
     bad_methods = [m for m in methods if m not in allowed_methods]
     if bad_methods:
         raise ValueError(f"unsupported methods: {bad_methods}")
@@ -439,6 +459,10 @@ def main() -> None:
                         save_pretrain_ckpt=bool(args.save_pretrain_ckpt),
                         pretrain_ckpt_path=str(args.pretrain_ckpt_path),
                         load_pretrain_ckpt=str(args.load_pretrain_ckpt),
+                        motif_max_edits=int(args.motif_max_edits),
+                        motif_prior_eta=float(args.motif_prior_eta),
+                        behavior_novelty_beta=float(args.behavior_novelty_beta),
+                        behavior_archive_size=int(args.behavior_archive_size),
                     )
                     if args.dry_run:
                         output = "[dry-run] skipped kaggle kernels push"

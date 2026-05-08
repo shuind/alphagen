@@ -18,6 +18,9 @@ from alphagen_qlib.stock_data import FeatureType, StockData
 from new.classic_factors import DEFAULT_LOSS_WEIGHTS, load_classic_factor_bank
 from new.env import HEAD_NAMES, MultiHeadAlphaEnv
 from new.head_pretrain import parse_loss_weights, pretrain_policy_heads
+from new.motif_bank import motif_summary
+from new.motif_env import MotifEditAlphaEnv, N_ACTIONS as MOTIF_EDIT_ACTIONS
+from new.motif_pool import MotifEditAlphaPool
 from new.policy import MultiHeadMaskablePolicy, MultiHeadTransformerFeatures
 from new.pool import MultiHeadAlphaPool
 from train_maskable_ppo import CustomCallback
@@ -59,6 +62,10 @@ def main(
     save_pretrain_ckpt: bool = False,
     pretrain_ckpt_path: str = "",
     load_pretrain_ckpt: str = "",
+    motif_max_edits: int = 4,
+    motif_prior_eta: float = 0.02,
+    behavior_novelty_beta: float = 0.05,
+    behavior_archive_size: int = 128,
     save_model_ckpt: bool = False,
     reward_per_step: float = REWARD_PER_STEP,
     run_name: str = "",
@@ -131,26 +138,55 @@ def main(
     calculator_valid = QLibStockDataCalculator(data_valid, target)
     calculator_test = QLibStockDataCalculator(data_test, target)
 
-    beta = float(intrinsic_beta) if method == "multihead_intrinsic" else 0.0
-    pool: AlphaPoolBase = MultiHeadAlphaPool(
-        capacity=pool_capacity,
-        calculator=calculator_train,
-        ic_lower_bound=None,
-        l1_alpha=5e-3,
-        re_mode="ensemble",
-        intrinsic_beta=beta,
-        profile_timing=True,
-        optimize_every=optimize_every,
-        optimize_n_iter=optimize_n_iter,
-        device=torch_device,
-    )
-    env = MultiHeadAlphaEnv(
-        pool=pool,
-        method=method,
-        device=torch_device,
-        print_expr=False,
-        reward_per_step=reward_per_step,
-    )
+    token_methods = {"single_transformer", "multihead", "multihead_intrinsic"}
+    token_multihead_methods = {"multihead", "multihead_intrinsic"}
+    motif_methods = {"motif_edit", "motif_edit_intrinsic"}
+    if method not in token_methods | motif_methods:
+        raise ValueError(f"unsupported method: {method}")
+
+    if method in motif_methods:
+        beta = float(behavior_novelty_beta) if method == "motif_edit_intrinsic" else 0.0
+        pool: AlphaPoolBase = MotifEditAlphaPool(
+            capacity=pool_capacity,
+            calculator=calculator_train,
+            ic_lower_bound=None,
+            l1_alpha=5e-3,
+            re_mode="ensemble",
+            behavior_novelty_beta=beta,
+            motif_prior_eta=float(motif_prior_eta),
+            behavior_archive_size=int(behavior_archive_size),
+            profile_timing=True,
+            optimize_every=optimize_every,
+            optimize_n_iter=optimize_n_iter,
+            device=torch_device,
+        )
+        env = MotifEditAlphaEnv(
+            pool=pool,
+            method=method,
+            max_edits=int(motif_max_edits),
+            reward_per_step=reward_per_step,
+        )
+    else:
+        beta = float(intrinsic_beta) if method == "multihead_intrinsic" else 0.0
+        pool = MultiHeadAlphaPool(
+            capacity=pool_capacity,
+            calculator=calculator_train,
+            ic_lower_bound=None,
+            l1_alpha=5e-3,
+            re_mode="ensemble",
+            intrinsic_beta=beta,
+            profile_timing=True,
+            optimize_every=optimize_every,
+            optimize_n_iter=optimize_n_iter,
+            device=torch_device,
+        )
+        env = MultiHeadAlphaEnv(
+            pool=pool,
+            method=method,
+            device=torch_device,
+            print_expr=False,
+            reward_per_step=reward_per_step,
+        )
 
     step_tag = _format_step_tag(int(steps))
     name_prefix = run_name or f"mh_seed{seed}_{method}_p{pool_capacity}_{step_tag}"
@@ -168,7 +204,7 @@ def main(
         raise FileNotFoundError(f"pretrain checkpoint not found: {load_pretrain_ckpt}")
 
     head_pretrain_enabled = (
-        method != "single_transformer"
+        method in token_multihead_methods
         and not bool(no_head_pretrain)
         and int(head_pretrain_epochs) > 0
         and not bool(load_pretrain_ckpt)
@@ -176,7 +212,7 @@ def main(
     classic_factors = []
     skipped_classic_factors = []
     classic_factor_stats = {}
-    if method != "single_transformer" and not bool(no_head_pretrain) and not bool(load_pretrain_ckpt):
+    if method in token_multihead_methods and not bool(no_head_pretrain) and not bool(load_pretrain_ckpt):
         factor_bank_result = load_classic_factor_bank(
             csv_path=classic_factor_csv,
             bank=classic_factor_bank,
@@ -201,10 +237,17 @@ def main(
         "pool_capacity": pool_capacity,
         "steps": steps,
         "method": method,
-        "backbone": "shared_transformer",
+        "backbone": "motif_edit_mlp" if method in motif_methods else "shared_transformer",
         "head_names": list(HEAD_NAMES),
         "reward_mode": "re",
         "intrinsic_beta": beta,
+        "motif_method": bool(method in motif_methods),
+        "motif_max_edits": int(motif_max_edits),
+        "motif_prior_eta": float(motif_prior_eta),
+        "behavior_novelty_beta": float(beta if method in motif_methods else 0.0),
+        "behavior_archive_size": int(behavior_archive_size),
+        "motif_summary": motif_summary() if method in motif_methods else {},
+        "motif_edit_action_count": int(MOTIF_EDIT_ACTIONS) if method in motif_methods else 0,
         "simple_bias": simple_bias,
         "ts_bias": ts_bias,
         "optimize_every": optimize_every,
@@ -259,29 +302,43 @@ def main(
         verbose=verbose,
     )
 
-    model = MaskablePPO(
-        MultiHeadMaskablePolicy,
-        env,
-        policy_kwargs=dict(
-            features_extractor_class=MultiHeadTransformerFeatures,
-            features_extractor_kwargs=dict(
-                n_encoder_layers=2,
-                d_model=128,
-                n_head=4,
-                d_ffn=256,
-                dropout=0.1,
-                device=torch_device,
+    if method in motif_methods:
+        motif_n_steps = max(64, min(2048, int(steps)))
+        model = MaskablePPO(
+            "MlpPolicy",
+            env,
+            gamma=1.0,
+            ent_coef=0.01,
+            n_steps=motif_n_steps,
+            batch_size=min(128, motif_n_steps),
+            tensorboard_log=tb_run_dir,
+            device=torch_device,
+            verbose=verbose,
+        )
+    else:
+        model = MaskablePPO(
+            MultiHeadMaskablePolicy,
+            env,
+            policy_kwargs=dict(
+                features_extractor_class=MultiHeadTransformerFeatures,
+                features_extractor_kwargs=dict(
+                    n_encoder_layers=2,
+                    d_model=128,
+                    n_head=4,
+                    d_ffn=256,
+                    dropout=0.1,
+                    device=torch_device,
+                ),
+                simple_bias=simple_bias,
+                ts_bias=ts_bias,
             ),
-            simple_bias=simple_bias,
-            ts_bias=ts_bias,
-        ),
-        gamma=1.0,
-        ent_coef=0.01,
-        batch_size=128,
-        tensorboard_log=tb_run_dir,
-        device=torch_device,
-        verbose=verbose,
-    )
+            gamma=1.0,
+            ent_coef=0.01,
+            batch_size=128,
+            tensorboard_log=tb_run_dir,
+            device=torch_device,
+            verbose=verbose,
+        )
 
     if load_pretrain_ckpt:
         print(f"[head-pretrain] loading checkpoint: {load_pretrain_ckpt}")
@@ -359,7 +416,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--market", type=str, default=None)
     parser.add_argument("--pool", type=int, default=None)
     parser.add_argument("--step", "--steps", dest="step", type=int, default=None)
-    parser.add_argument("--method", choices=["single_transformer", "multihead", "multihead_intrinsic"], default="multihead_intrinsic")
+    parser.add_argument(
+        "--method",
+        choices=["single_transformer", "multihead", "multihead_intrinsic", "motif_edit", "motif_edit_intrinsic"],
+        default="multihead_intrinsic",
+    )
     parser.add_argument("--intrinsic-beta", type=float, default=0.1)
     parser.add_argument("--simple-bias", type=float, default=0.4)
     parser.add_argument("--ts-bias", type=float, default=0.5)
@@ -379,6 +440,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-pretrain-ckpt", action="store_true")
     parser.add_argument("--pretrain-ckpt-path", type=str, default="")
     parser.add_argument("--load-pretrain-ckpt", type=str, default="")
+    parser.add_argument("--motif-max-edits", type=int, default=4)
+    parser.add_argument("--motif-prior-eta", type=float, default=0.02)
+    parser.add_argument("--behavior-novelty-beta", type=float, default=0.05)
+    parser.add_argument("--behavior-archive-size", type=int, default=128)
     parser.add_argument("--save_model_ckpt", action="store_true")
     parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
     parser.add_argument("--run_name", type=str, default="")
@@ -423,6 +488,10 @@ if __name__ == "__main__":
         save_pretrain_ckpt=args.save_pretrain_ckpt,
         pretrain_ckpt_path=args.pretrain_ckpt_path,
         load_pretrain_ckpt=args.load_pretrain_ckpt,
+        motif_max_edits=args.motif_max_edits,
+        motif_prior_eta=args.motif_prior_eta,
+        behavior_novelty_beta=args.behavior_novelty_beta,
+        behavior_archive_size=args.behavior_archive_size,
         save_model_ckpt=args.save_model_ckpt,
         reward_per_step=args.reward_per_step,
         run_name=args.run_name,
