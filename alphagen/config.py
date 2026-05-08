@@ -6,14 +6,18 @@ MAX_EPISODE_LENGTH = 256
 
 OPERATORS = [
     # Unary
-    Abs,  # Sign,
+    Abs,
+    Sign,
+    SafeSqrt,
     Log,
+    CSRank,
     # Binary
     Add, Sub, Mul, Div, Greater, Less,
     # Rolling
     Ref, Mean, Sum, Std, Var,  # Skew, Kurt,
     Max, Min,
-    Med, Mad,  # Rank,
+    Med, Mad,
+    TSRank,
     Delta, WMA, EMA,
     # Pair rolling
     Cov, Corr

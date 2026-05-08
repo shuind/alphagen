@@ -12,11 +12,17 @@ OP_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]*)\(")
 FIELD_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
 CONSTANT_RE = re.compile(r"Constant\([-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?\)", re.IGNORECASE)
 STEP_RE = re.compile(r"(\d+)_steps_pool\.json$")
+WINDOW_RE = re.compile(r",(10|20|30|40|50)\)")
 
-HEADS = ("base", "simple", "ts", "pv", "rank", "explore")
+HEADS = ("base", "trend", "volatility", "volume", "corr", "rank", "explore")
 RISKY_OPS = {"Div", "Log", "Corr", "Cov", "Std", "Var", "Mad"}
 COMPARISON_OPS = {"Greater", "Less"}
-TS_OPS = {"Ref", "Delta", "Mean", "Std", "Corr", "Cov", "WMA", "EMA", "Sum", "Med"}
+TREND_OPS = {"Ref", "Delta", "Mean", "WMA", "EMA", "TSRank"}
+VOLATILITY_OPS = {"Std", "Var", "Mad", "SafeSqrt", "Abs", "Max", "Min"}
+VOLUME_OPS = {"Mul", "Div", "Mean", "Sum", "Delta"}
+CORR_OPS = {"Corr", "Cov"}
+RANK_OPS = {"CSRank", "TSRank", "Sign", "Greater", "Less", "Max", "Min"}
+VOLUME_FIELDS = {"$volume", "$vwap"}
 
 
 def _split_csv(text: str) -> List[str]:
@@ -91,10 +97,20 @@ def _expr_stats(expr: str) -> Dict[str, float]:
     ops = OP_RE.findall(expr)
     fields = FIELD_RE.findall(expr)
     constants = CONSTANT_RE.findall(expr)
+    windows = WINDOW_RE.findall(expr)
     risky = sum(1 for op in ops if op in RISKY_OPS)
     comparisons = sum(1 for op in ops if op in COMPARISON_OPS)
-    ts_ops = sum(1 for op in ops if op in TS_OPS)
+    trend_ops = sum(1 for op in ops if op in TREND_OPS)
+    volatility_ops = sum(1 for op in ops if op in VOLATILITY_OPS)
+    volume_ops = sum(1 for op in ops if op in VOLUME_OPS)
+    corr_ops = sum(1 for op in ops if op in CORR_OPS)
+    rank_ops = sum(1 for op in ops if op in RANK_OPS)
     op_count = len(ops)
+    unique_fields = set(fields)
+    has_range = "$high" in unique_fields and "$low" in unique_fields
+    has_volume = bool(unique_fields & VOLUME_FIELDS)
+    simple_like = (op_count + len(fields) + len(constants)) <= 8 and _max_depth(expr) <= 4 and (risky / op_count if op_count else 0.0) <= 0.35
+    abnormal_nesting = _max_depth(expr) >= 7 and (risky >= 3 or ops.count("Div") >= 3 or ops.count("Log") >= 2)
     return {
         "node_count": float(op_count + len(fields) + len(constants)),
         "depth": float(_max_depth(expr)),
@@ -104,11 +120,46 @@ def _expr_stats(expr: str) -> Dict[str, float]:
         "constant_count": float(len(constants)),
         "risky_op_count": float(risky),
         "comparison_op_count": float(comparisons),
-        "ts_op_count": float(ts_ops),
+        "trend_op_count": float(trend_ops),
+        "volatility_op_count": float(volatility_ops),
+        "volume_op_count": float(volume_ops),
+        "corr_op_count": float(corr_ops),
+        "rank_op_count": float(rank_ops),
         "risky_op_ratio": float(risky / op_count) if op_count else 0.0,
         "comparison_op_ratio": float(comparisons / op_count) if op_count else 0.0,
-        "ts_op_ratio": float(ts_ops / op_count) if op_count else 0.0,
+        "trend_op_ratio": float(trend_ops / op_count) if op_count else 0.0,
+        "volatility_op_ratio": float(volatility_ops / op_count) if op_count else 0.0,
+        "volume_op_ratio": float(volume_ops / op_count) if op_count else 0.0,
+        "corr_op_ratio": float(corr_ops / op_count) if op_count else 0.0,
+        "rank_op_ratio": float(rank_ops / op_count) if op_count else 0.0,
+        "unique_field_count": float(len(unique_fields)),
+        "unique_window_count": float(len(set(windows))),
+        "has_trend": float(trend_ops > 0),
+        "has_volatility": float(volatility_ops > 0 or has_range),
+        "has_volume": float(has_volume),
+        "has_corr": float(corr_ops > 0),
+        "has_rank": float(rank_ops > 0),
+        "is_simple_like": float(simple_like),
+        "abnormal_nesting": float(abnormal_nesting),
     }
+
+
+def _head_preference_match(head: str, stats: Dict[str, float]) -> bool:
+    if head == "trend":
+        return bool(stats["has_trend"])
+    if head == "volatility":
+        return bool(stats["has_volatility"])
+    if head == "volume":
+        return bool(stats["has_volume"])
+    if head == "corr":
+        return bool(stats["has_corr"])
+    if head == "rank":
+        return bool(stats["has_rank"])
+    if head == "explore":
+        return not bool(stats["abnormal_nesting"])
+    if head == "base":
+        return True
+    return False
 
 
 def _select_files(files: List[Tuple[str, Path]], step_mode: str) -> List[Tuple[str, Path]]:
@@ -135,7 +186,12 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
     sig_counts = Counter(signatures)
     op_counts = Counter(op for expr in exprs for op in OP_RE.findall(expr))
     field_counts = Counter(field for expr in exprs for field in FIELD_RE.findall(expr))
+    window_counts = Counter(window for expr in exprs for window in WINDOW_RE.findall(expr))
     head_counts = Counter(source_heads[: len(exprs)])
+    aligned = [
+        _head_preference_match(source_heads[idx] if idx < len(source_heads) else "", stats)
+        for idx, stats in enumerate(per_expr)
+    ]
 
     n = len(exprs)
     row = {
@@ -152,14 +208,29 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
         "mean_op_count": _safe_mean([x["op_count"] for x in per_expr]),
         "mean_field_count": _safe_mean([x["field_count"] for x in per_expr]),
         "mean_constant_count": _safe_mean([x["constant_count"] for x in per_expr]),
+        "mean_unique_field_count": _safe_mean([x["unique_field_count"] for x in per_expr]),
+        "mean_unique_window_count": _safe_mean([x["unique_window_count"] for x in per_expr]),
         "risky_op_ratio": _safe_mean([x["risky_op_ratio"] for x in per_expr]),
         "comparison_op_ratio": _safe_mean([x["comparison_op_ratio"] for x in per_expr]),
-        "ts_op_ratio": _safe_mean([x["ts_op_ratio"] for x in per_expr]),
+        "trend_op_ratio": _safe_mean([x["trend_op_ratio"] for x in per_expr]),
+        "volatility_op_ratio": _safe_mean([x["volatility_op_ratio"] for x in per_expr]),
+        "volume_op_ratio": _safe_mean([x["volume_op_ratio"] for x in per_expr]),
+        "corr_op_ratio": _safe_mean([x["corr_op_ratio"] for x in per_expr]),
+        "rank_op_ratio": _safe_mean([x["rank_op_ratio"] for x in per_expr]),
+        "trend_expr_ratio": _safe_mean([x["has_trend"] for x in per_expr]),
+        "volatility_expr_ratio": _safe_mean([x["has_volatility"] for x in per_expr]),
+        "volume_expr_ratio": _safe_mean([x["has_volume"] for x in per_expr]),
+        "corr_expr_ratio": _safe_mean([x["has_corr"] for x in per_expr]),
+        "rank_expr_ratio": _safe_mean([x["has_rank"] for x in per_expr]),
+        "simple_expr_ratio": _safe_mean([x["is_simple_like"] for x in per_expr]),
+        "classic_head_alignment_ratio": (sum(1 for x in aligned if x) / n) if n else 0.0,
+        "abnormal_nesting_ratio": _safe_mean([x["abnormal_nesting"] for x in per_expr]),
         "unique_ast_count": len(sig_counts),
         "ast_entropy": _entropy(signatures),
         "ast_max_cluster_ratio": (max(sig_counts.values()) / n) if n else 0.0,
         "top_ops": json.dumps(op_counts.most_common(8), ensure_ascii=False),
         "top_fields": json.dumps(field_counts.most_common(8), ensure_ascii=False),
+        "top_windows": json.dumps(window_counts.most_common(8), ensure_ascii=False),
         "source_head_counts": json.dumps(dict(head_counts), ensure_ascii=False),
     }
     for head in HEADS:
@@ -182,6 +253,14 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
                 "node_count": int(stats["node_count"]),
                 "depth": int(stats["depth"]),
                 "risky_op_ratio": round(stats["risky_op_ratio"], 4),
+                "has_trend": int(stats["has_trend"]),
+                "has_volatility": int(stats["has_volatility"]),
+                "has_volume": int(stats["has_volume"]),
+                "has_corr": int(stats["has_corr"]),
+                "has_rank": int(stats["has_rank"]),
+                "is_simple_like": int(stats["is_simple_like"]),
+                "abnormal_nesting": int(stats["abnormal_nesting"]),
+                "classic_head_match": int(_head_preference_match(source_heads[idx] if idx < len(source_heads) else "", stats)),
                 "expr": exprs[idx],
             }
         )
@@ -215,15 +294,18 @@ def _write_markdown(path: Path, rows: List[Dict], examples: List[Dict]) -> None:
 
     lines.extend(
         [
-            "| run_id | method | step | n | node | depth | risky | compare | ts | AST entropy | head counts |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| run_id | method | step | n | node | depth | risky | trend | volatility | volume | corr | rank | simple | align | abnormal | AST entropy | head counts |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for row in latest_by_run.values():
         lines.append(
             "| {run_id} | {method} | {step} | {n_factors} | {mean_node_count:.2f} | "
-            "{mean_depth:.2f} | {risky_op_ratio:.3f} | {comparison_op_ratio:.3f} | "
-            "{ts_op_ratio:.3f} | {ast_entropy:.3f} | `{source_head_counts}` |".format(**row)
+            "{mean_depth:.2f} | {risky_op_ratio:.3f} | {trend_expr_ratio:.3f} | "
+            "{volatility_expr_ratio:.3f} | {volume_expr_ratio:.3f} | {corr_expr_ratio:.3f} | "
+            "{rank_expr_ratio:.3f} | {simple_expr_ratio:.3f} | "
+            "{classic_head_alignment_ratio:.3f} | {abnormal_nesting_ratio:.3f} | "
+            "{ast_entropy:.3f} | `{source_head_counts}` |".format(**row)
         )
 
     lines.extend(["", "## Representative Factors", ""])
@@ -233,7 +315,10 @@ def _write_markdown(path: Path, rows: List[Dict], examples: List[Dict]) -> None:
         lines.append(
             f"- `{example['run_id']}` step={example['step']} rank={example['rank']} "
             f"head={example['source_head']} weight={example['weight']} "
-            f"nodes={example['node_count']} depth={example['depth']} risky={example['risky_op_ratio']}: "
+            f"nodes={example['node_count']} depth={example['depth']} risky={example['risky_op_ratio']} "
+            f"trend={example['has_trend']} vol={example['has_volatility']} volume={example['has_volume']} "
+            f"corr={example['has_corr']} rank={example['has_rank']} simple={example['is_simple_like']} "
+            f"align={example['classic_head_match']} abnormal={example['abnormal_nesting']}: "
             f"`{example['expr']}`"
         )
     path.write_text("\n".join(lines), encoding="utf-8")

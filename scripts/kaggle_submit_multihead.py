@@ -134,6 +134,10 @@ def _render_train_cell(
     head_pretrain_lr: float,
     head_pretrain_batch_size: int,
     classic_factor_csv: str,
+    classic_factor_bank: str,
+    classic_factor_augment: bool,
+    pretrain_loss_weights: str,
+    no_pretrain_aux_loss: bool,
     no_head_pretrain: bool,
     save_pretrain_ckpt: bool,
     pretrain_ckpt_path: str,
@@ -150,9 +154,17 @@ def _render_train_cell(
         f"  --head-pretrain-epochs {head_pretrain_epochs} \\",
         f"  --head-pretrain-lr {head_pretrain_lr} \\",
         f"  --head-pretrain-batch-size {head_pretrain_batch_size} \\",
+        f"  --classic-factor-bank {classic_factor_bank} \\",
+        f"  --pretrain-loss-weights {json.dumps(pretrain_loss_weights)} \\",
     ]
+    if classic_factor_augment:
+        lines.append("  --classic-factor-augment \\")
+    else:
+        lines.append("  --no-classic-factor-augment \\")
     if classic_factor_csv:
         lines.append(f"  --classic-factor-csv {json.dumps(classic_factor_csv)} \\")
+    if no_pretrain_aux_loss:
+        lines.append("  --no-pretrain-aux-loss \\")
     if no_head_pretrain:
         lines.append("  --no-head-pretrain \\")
     if save_pretrain_ckpt:
@@ -191,6 +203,10 @@ def _rewrite_notebook(
     head_pretrain_lr: float,
     head_pretrain_batch_size: int,
     classic_factor_csv: str,
+    classic_factor_bank: str,
+    classic_factor_augment: bool,
+    pretrain_loss_weights: str,
+    no_pretrain_aux_loss: bool,
     no_head_pretrain: bool,
     save_pretrain_ckpt: bool,
     pretrain_ckpt_path: str,
@@ -229,6 +245,10 @@ def _rewrite_notebook(
         head_pretrain_lr=head_pretrain_lr,
         head_pretrain_batch_size=head_pretrain_batch_size,
         classic_factor_csv=classic_factor_csv,
+        classic_factor_bank=classic_factor_bank,
+        classic_factor_augment=classic_factor_augment,
+        pretrain_loss_weights=pretrain_loss_weights,
+        no_pretrain_aux_loss=no_pretrain_aux_loss,
         no_head_pretrain=no_head_pretrain,
         save_pretrain_ckpt=save_pretrain_ckpt,
         pretrain_ckpt_path=pretrain_ckpt_path,
@@ -323,6 +343,12 @@ def main() -> None:
     parser.add_argument("--head-pretrain-lr", type=float, default=1e-3)
     parser.add_argument("--head-pretrain-batch-size", type=int, default=128)
     parser.add_argument("--classic-factor-csv", default="")
+    parser.add_argument("--classic-factor-bank", choices=["builtin_v1", "strong"], default="strong")
+    parser.add_argument("--classic-factor-augment", dest="classic_factor_augment", action="store_true")
+    parser.add_argument("--no-classic-factor-augment", dest="classic_factor_augment", action="store_false")
+    parser.set_defaults(classic_factor_augment=True)
+    parser.add_argument("--pretrain-loss-weights", default="next=1.0,head=0.2,attr=0.2")
+    parser.add_argument("--no-pretrain-aux-loss", action="store_true")
     parser.add_argument("--no-head-pretrain", action="store_true")
     parser.add_argument("--save-pretrain-ckpt", action="store_true")
     parser.add_argument("--pretrain-ckpt-path", default="")
@@ -405,6 +431,10 @@ def main() -> None:
                         head_pretrain_lr=float(args.head_pretrain_lr),
                         head_pretrain_batch_size=int(args.head_pretrain_batch_size),
                         classic_factor_csv=str(args.classic_factor_csv),
+                        classic_factor_bank=str(args.classic_factor_bank),
+                        classic_factor_augment=bool(args.classic_factor_augment),
+                        pretrain_loss_weights=str(args.pretrain_loss_weights),
+                        no_pretrain_aux_loss=bool(args.no_pretrain_aux_loss),
                         no_head_pretrain=bool(args.no_head_pretrain),
                         save_pretrain_ckpt=bool(args.save_pretrain_ckpt),
                         pretrain_ckpt_path=str(args.pretrain_ckpt_path),

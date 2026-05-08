@@ -15,9 +15,9 @@ from alphagen.utils.random import reseed_everything
 from alphagen_qlib.calculator import QLibStockDataCalculator
 from alphagen_qlib.compat import patch_all
 from alphagen_qlib.stock_data import FeatureType, StockData
-from new.classic_factors import load_classic_factors
-from new.env import MultiHeadAlphaEnv
-from new.head_pretrain import pretrain_policy_heads
+from new.classic_factors import DEFAULT_LOSS_WEIGHTS, load_classic_factor_bank
+from new.env import HEAD_NAMES, MultiHeadAlphaEnv
+from new.head_pretrain import parse_loss_weights, pretrain_policy_heads
 from new.policy import MultiHeadMaskablePolicy, MultiHeadTransformerFeatures
 from new.pool import MultiHeadAlphaPool
 from train_maskable_ppo import CustomCallback
@@ -51,6 +51,10 @@ def main(
     head_pretrain_lr: float = 1e-3,
     head_pretrain_batch_size: int = 128,
     classic_factor_csv: str = "",
+    classic_factor_bank: str = "strong",
+    classic_factor_augment: bool = True,
+    pretrain_loss_weights: str = DEFAULT_LOSS_WEIGHTS,
+    no_pretrain_aux_loss: bool = False,
     no_head_pretrain: bool = False,
     save_pretrain_ckpt: bool = False,
     pretrain_ckpt_path: str = "",
@@ -171,13 +175,24 @@ def main(
     )
     classic_factors = []
     skipped_classic_factors = []
+    classic_factor_stats = {}
     if method != "single_transformer" and not bool(no_head_pretrain) and not bool(load_pretrain_ckpt):
-        classic_factors, skipped_classic_factors = load_classic_factors(classic_factor_csv)
+        factor_bank_result = load_classic_factor_bank(
+            csv_path=classic_factor_csv,
+            bank=classic_factor_bank,
+            augment=bool(classic_factor_augment),
+        )
+        classic_factors = factor_bank_result.factors
+        skipped_classic_factors = factor_bank_result.skipped
+        classic_factor_stats = factor_bank_result.stats
         print(
             "[classic-factors] "
+            f"bank={classic_factor_bank} augment={bool(classic_factor_augment)} "
             f"loaded={len(classic_factors)} skipped={len(skipped_classic_factors)} "
+            f"deduped={classic_factor_stats.get('deduped_count', 0)} "
             f"heads={dict(Counter(f.head for f in classic_factors))}"
         )
+    parsed_pretrain_loss_weights = parse_loss_weights(pretrain_loss_weights)
 
     run_meta = {
         "run_id": run_id,
@@ -187,6 +202,7 @@ def main(
         "steps": steps,
         "method": method,
         "backbone": "shared_transformer",
+        "head_names": list(HEAD_NAMES),
         "reward_mode": "re",
         "intrinsic_beta": beta,
         "simple_bias": simple_bias,
@@ -198,12 +214,19 @@ def main(
         "head_pretrain_lr": float(head_pretrain_lr),
         "head_pretrain_batch_size": int(head_pretrain_batch_size),
         "classic_factor_csv": classic_factor_csv,
+        "classic_factor_bank": classic_factor_bank,
+        "classic_factor_augment": bool(classic_factor_augment),
+        "pretrain_loss_weights": parsed_pretrain_loss_weights,
+        "pretrain_aux_loss_enabled": not bool(no_pretrain_aux_loss),
         "save_pretrain_ckpt": bool(save_pretrain_ckpt),
         "pretrain_ckpt_path": pretrain_ckpt_path,
         "load_pretrain_ckpt": load_pretrain_ckpt,
         "classic_factor_count": len(classic_factors),
         "classic_factor_skipped_count": len(skipped_classic_factors),
         "classic_factor_head_counts": dict(Counter(f.head for f in classic_factors)),
+        "classic_factor_family_counts": dict(Counter((f.family or f.head) for f in classic_factors)),
+        "classic_factor_source_counts": dict(Counter(f.source for f in classic_factors)),
+        "classic_factor_stats": classic_factor_stats,
         "classic_factor_skipped": [s.__dict__ for s in skipped_classic_factors[:20]],
         "provider_uri": resolved_provider_uri,
         "train_start_time": train_start_time,
@@ -279,6 +302,11 @@ def main(
             "loss_start": None,
             "loss_end": None,
             "losses": [],
+            "next_losses": [],
+            "head_losses": [],
+            "attr_losses": [],
+            "aux_loss_enabled": False,
+            "loss_weights": parsed_pretrain_loss_weights,
         }
     elif head_pretrain_enabled:
         pretrain_summary = pretrain_policy_heads(
@@ -288,6 +316,8 @@ def main(
             lr=float(head_pretrain_lr),
             batch_size=int(head_pretrain_batch_size),
             seed=int(seed),
+            loss_weights=parsed_pretrain_loss_weights,
+            use_aux_loss=not bool(no_pretrain_aux_loss),
         )
     else:
         pretrain_summary = {
@@ -298,6 +328,11 @@ def main(
             "loss_start": None,
             "loss_end": None,
             "losses": [],
+            "next_losses": [],
+            "head_losses": [],
+            "attr_losses": [],
+            "aux_loss_enabled": not bool(no_pretrain_aux_loss),
+            "loss_weights": parsed_pretrain_loss_weights,
         }
     if save_pretrain_ckpt:
         resolved_pretrain_ckpt_path = pretrain_ckpt_path or os.path.join(ckpt_run_dir, "pretrained_policy.zip")
@@ -334,6 +369,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--head-pretrain-lr", type=float, default=1e-3)
     parser.add_argument("--head-pretrain-batch-size", type=int, default=128)
     parser.add_argument("--classic-factor-csv", type=str, default="")
+    parser.add_argument("--classic-factor-bank", choices=["builtin_v1", "strong"], default="strong")
+    parser.add_argument("--classic-factor-augment", dest="classic_factor_augment", action="store_true")
+    parser.add_argument("--no-classic-factor-augment", dest="classic_factor_augment", action="store_false")
+    parser.set_defaults(classic_factor_augment=True)
+    parser.add_argument("--pretrain-loss-weights", type=str, default=DEFAULT_LOSS_WEIGHTS)
+    parser.add_argument("--no-pretrain-aux-loss", action="store_true")
     parser.add_argument("--no-head-pretrain", action="store_true")
     parser.add_argument("--save-pretrain-ckpt", action="store_true")
     parser.add_argument("--pretrain-ckpt-path", type=str, default="")
@@ -374,6 +415,10 @@ if __name__ == "__main__":
         head_pretrain_lr=args.head_pretrain_lr,
         head_pretrain_batch_size=args.head_pretrain_batch_size,
         classic_factor_csv=args.classic_factor_csv,
+        classic_factor_bank=args.classic_factor_bank,
+        classic_factor_augment=args.classic_factor_augment,
+        pretrain_loss_weights=args.pretrain_loss_weights,
+        no_pretrain_aux_loss=args.no_pretrain_aux_loss,
         no_head_pretrain=args.no_head_pretrain,
         save_pretrain_ckpt=args.save_pretrain_ckpt,
         pretrain_ckpt_path=args.pretrain_ckpt_path,

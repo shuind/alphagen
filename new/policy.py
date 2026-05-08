@@ -11,10 +11,30 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, MlpExtr
 from stable_baselines3.common.type_aliases import Schedule
 from torch import nn
 
-from alphagen.config import OPERATORS
+from alphagen.config import DELTA_TIMES, OPERATORS
 from alphagen.rl.policy import PositionalEncoding
-from alphagen.rl.env.wrapper import OFFSET_OP
+from alphagen.rl.env.wrapper import OFFSET_DELTA_TIME, OFFSET_FEATURE, OFFSET_OP
+from alphagen_qlib.stock_data import FeatureType
 from new.env import HEAD_NAMES
+
+
+class ResidualHeadAdapter(nn.Module):
+    """Small per-head adapter so heads can specialize beyond a final linear layer."""
+
+    def __init__(self, dim: int, activation_fn: Type[nn.Module]):
+        super().__init__()
+        hidden = max(16, dim // 2)
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden),
+            activation_fn(),
+            nn.Linear(hidden, dim),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, latent: th.Tensor) -> th.Tensor:
+        return latent + self.net(latent)
 
 
 class MultiHeadTransformerFeatures(BaseFeaturesExtractor):
@@ -89,9 +109,10 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
         self.ts_bias = float(ts_bias)
         self.temperatures_cfg = temperatures or {
             "base": 1.0,
-            "simple": 0.9,
-            "ts": 1.0,
-            "pv": 1.0,
+            "trend": 1.0,
+            "volatility": 1.0,
+            "volume": 1.0,
+            "corr": 1.0,
             "rank": 1.0,
             "explore": 1.3,
         }
@@ -115,6 +136,9 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
         latent_dim_pi = self.mlp_extractor.latent_dim_pi
         latent_dim_vf = self.mlp_extractor.latent_dim_vf
         action_dim = int(self.action_space.n)
+        self.action_adapters = nn.ModuleList(
+            [ResidualHeadAdapter(latent_dim_pi, self.activation_fn) for _ in self.head_names]
+        )
         self.action_nets = nn.ModuleList([nn.Linear(latent_dim_pi, action_dim) for _ in self.head_names])
         self.value_nets = nn.ModuleList([nn.Linear(latent_dim_vf, 1) for _ in self.head_names])
         self.register_buffer("head_bias", self._build_head_bias(action_dim))
@@ -151,22 +175,65 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
     def _build_head_bias(self, action_dim: int) -> th.Tensor:
         bias = th.zeros((len(self.head_names), action_dim), dtype=th.float32)
         complex_ops = {"Corr", "Cov", "Div", "Log", "Std", "Var", "Mad"}
-        ts_ops = {"Ref", "Delta", "Mean", "Std", "Corr", "Cov", "WMA", "EMA", "Sum"}
-        pv_ops = {"Mul", "Div", "Corr", "Cov", "Mean", "Sum"}
-        rank_ops = {"Greater", "Less", "Max", "Min"}
+        trend_ops = {"Ref", "Delta", "Mean", "WMA", "EMA", "TSRank"}
+        volatility_ops = {"Std", "Var", "Mad", "SafeSqrt", "Abs", "Max", "Min"}
+        volume_ops = {"Mul", "Div", "Mean", "Sum", "Delta"}
+        corr_ops = {"Corr", "Cov"}
+        rank_ops = {"CSRank", "TSRank", "Greater", "Less", "Max", "Min"}
+        trend_head = self.head_names.index("trend")
+        volatility_head = self.head_names.index("volatility")
+        volume_head = self.head_names.index("volume")
+        corr_head = self.head_names.index("corr")
+        rank_head = self.head_names.index("rank") if "rank" in self.head_names else -1
+        explore_head = self.head_names.index("explore") if "explore" in self.head_names else -1
         for idx, op in enumerate(OPERATORS):
             action_idx = OFFSET_OP + idx - 1
             if action_idx < 0 or action_idx >= action_dim:
                 continue
             name = op.__name__
             if name in complex_ops:
-                bias[self.head_names.index("simple"), action_idx] -= self.simple_bias
-            if name in ts_ops:
-                bias[self.head_names.index("ts"), action_idx] += self.ts_bias
-            if "pv" in self.head_names and name in pv_ops:
-                bias[self.head_names.index("pv"), action_idx] += 0.25
-            if "rank" in self.head_names and name in rank_ops:
-                bias[self.head_names.index("rank"), action_idx] += 0.35
+                bias[self.head_names.index("base"), action_idx] -= self.simple_bias * 0.25
+            if name in trend_ops:
+                bias[trend_head, action_idx] += self.ts_bias
+            if name in volatility_ops:
+                bias[volatility_head, action_idx] += 0.45
+            if name in volume_ops:
+                bias[volume_head, action_idx] += 0.35
+            if name in corr_ops:
+                bias[corr_head, action_idx] += 0.70
+            if rank_head >= 0 and name in rank_ops:
+                bias[rank_head, action_idx] += 0.45
+            if rank_head >= 0 and name == "CSRank":
+                bias[rank_head, action_idx] += 0.35
+            if name == "TSRank":
+                bias[trend_head, action_idx] += 0.20
+                bias[rank_head, action_idx] += 0.20
+            if explore_head >= 0 and name in {"Abs", "Log", "Mad", "Med", "Corr", "Cov"}:
+                bias[explore_head, action_idx] += 0.15
+        feature_bias = {
+            "trend": {"OPEN": 0.10, "CLOSE": 0.25, "HIGH": 0.05, "LOW": 0.05, "VWAP": 0.15, "VOLUME": 0.00},
+            "volatility": {"OPEN": 0.10, "CLOSE": 0.15, "HIGH": 0.25, "LOW": 0.25, "VWAP": 0.05, "VOLUME": -0.05},
+            "volume": {"OPEN": 0.05, "CLOSE": 0.15, "HIGH": 0.05, "LOW": 0.05, "VWAP": 0.25, "VOLUME": 0.40},
+            "corr": {"OPEN": 0.05, "CLOSE": 0.20, "HIGH": 0.10, "LOW": 0.10, "VWAP": 0.25, "VOLUME": 0.30},
+            "rank": {"OPEN": 0.05, "CLOSE": 0.20, "HIGH": 0.15, "LOW": 0.15, "VWAP": 0.15, "VOLUME": 0.10},
+        }
+        for head_name, weights in feature_bias.items():
+            if head_name not in self.head_names:
+                continue
+            head_idx = self.head_names.index(head_name)
+            for feature_name, value in weights.items():
+                action_idx = OFFSET_FEATURE + int(FeatureType[feature_name]) - 1
+                if 0 <= action_idx < action_dim:
+                    bias[head_idx, action_idx] += float(value)
+        for idx, delta_time in enumerate(DELTA_TIMES):
+            action_idx = OFFSET_DELTA_TIME + idx - 1
+            if 0 <= action_idx < action_dim:
+                bias[trend_head, action_idx] += 0.20
+                bias[volatility_head, action_idx] += 0.15
+                bias[volume_head, action_idx] += 0.10
+                bias[corr_head, action_idx] += 0.15
+                if explore_head >= 0 and delta_time in {30, 40, 50}:
+                    bias[explore_head, action_idx] += 0.10
         return bias
 
     def _head_ids(self, obs: th.Tensor) -> th.Tensor:
@@ -177,8 +244,14 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
         gather_idx = head_ids.view(-1, 1, 1).expand(-1, 1, outputs.shape[-1])
         return outputs.gather(1, gather_idx).squeeze(1)
 
+    def _adapt_action_latent(self, latent: th.Tensor, head_ids: th.Tensor) -> th.Tensor:
+        adapted = th.stack([adapter(latent) for adapter in self.action_adapters], dim=1)
+        gather_idx = head_ids.view(-1, 1, 1).expand(-1, 1, adapted.shape[-1])
+        return adapted.gather(1, gather_idx).squeeze(1)
+
     def _dist_from_obs_latent(self, obs: th.Tensor, latent_pi: th.Tensor) -> MaskableDistribution:
         head_ids = self._head_ids(obs)
+        latent_pi = self._adapt_action_latent(latent_pi, head_ids)
         logits = self._select_by_head(self.action_nets, latent_pi, head_ids)
         logits = logits + self.head_bias[head_ids]
         logits = logits / self.head_temperature[head_ids].unsqueeze(1).clamp_min(1e-6)
@@ -193,6 +266,7 @@ class MultiHeadMaskablePolicy(MaskableActorCriticPolicy):
             features = features[0]
         latent_pi = self.mlp_extractor.forward_actor(features)
         head_ids = self._head_ids(obs)
+        latent_pi = self._adapt_action_latent(latent_pi, head_ids)
         logits = self._select_by_head(self.action_nets, latent_pi, head_ids)
         logits = logits + self.head_bias[head_ids]
         return logits / self.head_temperature[head_ids].unsqueeze(1).clamp_min(1e-6)

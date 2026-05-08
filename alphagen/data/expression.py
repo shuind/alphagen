@@ -263,6 +263,11 @@ class Sign(UnaryOperator):
     def _apply(self, operand: Tensor) -> Tensor: return operand.sign()
 
 
+class SafeSqrt(UnaryOperator):
+    def _apply(self, operand: Tensor) -> Tensor:
+        return operand.abs().clamp_min(1e-12).sqrt()
+
+
 class Log(UnaryOperator):
     def _apply(self, operand: Tensor) -> Tensor: return operand.log()
 
@@ -270,8 +275,9 @@ class Log(UnaryOperator):
 class CSRank(UnaryOperator):
     def _apply(self, operand: Tensor) -> Tensor:
         nan_mask = operand.isnan()
-        n = (~nan_mask).sum(dim=1, keepdim=True)
-        rank = operand.argsort().argsort() / n
+        clean = operand.masked_fill(nan_mask, float("inf"))
+        n = (~nan_mask).sum(dim=1, keepdim=True).clamp_min(1)
+        rank = clean.argsort(dim=1).argsort(dim=1).to(operand.dtype) / n.to(operand.dtype)
         rank[nan_mask] = torch.nan
         return rank
 
@@ -390,6 +396,10 @@ class Rank(RollingOperator):
         return result
 
 
+class TSRank(Rank):
+    pass
+
+
 class Delta(RollingOperator):
     # Delta is not *really* a rolling operator, in that other rolling operators
     # deal with the values in (-dt, 0], while Delta only deal with the values
@@ -448,12 +458,12 @@ class Corr(PairRollingOperator):
 # Deprecated!
 Operators: List[Type[Expression]] = [
     # Unary
-    Abs, Sign, Log, CSRank,
+    Abs, Sign, SafeSqrt, Log, CSRank,
     # Binary
     Add, Sub, Mul, Div, Pow, Greater, Less,
     # Rolling
     Ref, Mean, Sum, Std, Var, Skew, Kurt, Max, Min,
-    Med, Mad, Rank, Delta, WMA, EMA,
+    Med, Mad, Rank, TSRank, Delta, WMA, EMA,
     # Pair rolling
     Cov, Corr
 ]
