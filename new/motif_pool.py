@@ -61,6 +61,11 @@ class MotifEditAlphaPool(AlphaPool):
                 continue
         return float(max(0.0, 1.0 - max_abs))
 
+    def _novelty_enabled_for_strategy(self, source_head: str) -> bool:
+        if self.behavior_novelty_beta <= 0.0 or self.behavior_archive_size <= 0:
+            return False
+        return self.behavior_novelty_strategies is None or source_head in self.behavior_novelty_strategies
+
     def try_new_expr(
         self,
         expr: Expression,
@@ -109,7 +114,8 @@ class MotifEditAlphaPool(AlphaPool):
             self.last_reward_info = info
             return -1.0, info
 
-        behavior_novelty = self._calc_behavior_novelty(expr)
+        novelty_enabled = self._novelty_enabled_for_strategy(source_head)
+        behavior_novelty = self._calc_behavior_novelty(expr) if novelty_enabled else 0.0
         self._pending_behavior_novelty = behavior_novelty
         reward, info = super().try_new_expr(expr, token_seq=token_seq)
         info = dict(info)
@@ -135,14 +141,13 @@ class MotifEditAlphaPool(AlphaPool):
             return reward, info
 
         self.head_valid[source_head] += 1
-        novelty_enabled = self.behavior_novelty_strategies is None or source_head in self.behavior_novelty_strategies
         behavior_reward = (self.behavior_novelty_beta * behavior_novelty) if novelty_enabled else 0.0
         has_motif_trace = bool(motif_id or edit_path)
         naturalness_reward = (self.motif_prior_eta * float(naturalness_score)) if has_motif_trace else 0.0
         reward_total = float(reward + behavior_reward + naturalness_reward)
 
         re_value = float(info.get("re", 0.0))
-        if novelty_enabled and re_value > 0 and self.behavior_archive_size > 0:
+        if novelty_enabled and re_value > 0:
             self.behavior_archive.append(expr)
 
         expr_text = str(expr)
