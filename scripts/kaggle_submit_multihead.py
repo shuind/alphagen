@@ -146,6 +146,13 @@ def _render_train_cell(
     motif_prior_eta: float,
     behavior_novelty_beta: float,
     behavior_archive_size: int,
+    typed_robust_years: str,
+    typed_robust_lambda: float,
+    typed_robust_bottom_k: int,
+    qd_cell_capacity: int,
+    qd_behavior_threshold: float,
+    qd_bonus: float,
+    typed_min_robust_score: float,
 ) -> str:
     lines = [
         f"!python -m new.train_multihead_ppo {seed} {market} {pool} --step {step} \\",
@@ -164,6 +171,13 @@ def _render_train_cell(
         f"  --motif-prior-eta {motif_prior_eta} \\",
         f"  --behavior-novelty-beta {behavior_novelty_beta} \\",
         f"  --behavior-archive-size {behavior_archive_size} \\",
+        f"  --typed-robust-years {json.dumps(typed_robust_years)} \\",
+        f"  --typed-robust-lambda {typed_robust_lambda} \\",
+        f"  --typed-robust-bottom-k {typed_robust_bottom_k} \\",
+        f"  --qd-cell-capacity {qd_cell_capacity} \\",
+        f"  --qd-behavior-threshold {qd_behavior_threshold} \\",
+        f"  --qd-bonus {qd_bonus} \\",
+        f"  --typed-min-robust-score {typed_min_robust_score} \\",
     ]
     if classic_factor_augment:
         lines.append("  --classic-factor-augment \\")
@@ -223,6 +237,13 @@ def _rewrite_notebook(
     motif_prior_eta: float,
     behavior_novelty_beta: float,
     behavior_archive_size: int,
+    typed_robust_years: str,
+    typed_robust_lambda: float,
+    typed_robust_bottom_k: int,
+    qd_cell_capacity: int,
+    qd_behavior_threshold: float,
+    qd_bonus: float,
+    typed_min_robust_score: float,
 ) -> None:
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
     _ensure_new_package_cell(payload, files)
@@ -269,6 +290,13 @@ def _rewrite_notebook(
         motif_prior_eta=motif_prior_eta,
         behavior_novelty_beta=behavior_novelty_beta,
         behavior_archive_size=behavior_archive_size,
+        typed_robust_years=typed_robust_years,
+        typed_robust_lambda=typed_robust_lambda,
+        typed_robust_bottom_k=typed_robust_bottom_k,
+        qd_cell_capacity=qd_cell_capacity,
+        qd_behavior_threshold=qd_behavior_threshold,
+        qd_bonus=qd_bonus,
+        typed_min_robust_score=typed_min_robust_score,
     )
     train_cell = {
         "cell_type": "code",
@@ -345,7 +373,7 @@ def main() -> None:
     parser.add_argument(
         "--methods",
         default="single_transformer,multihead,multihead_intrinsic",
-        help="csv: single_transformer,multihead,multihead_intrinsic,motif_edit,motif_edit_intrinsic",
+        help="csv: single_transformer,multihead,multihead_intrinsic,motif_edit,motif_edit_intrinsic,typed_qd,typed_qd_intrinsic",
     )
     parser.add_argument("--market", default="tcsi300")
     parser.add_argument("--pool", type=int, default=10)
@@ -373,6 +401,13 @@ def main() -> None:
     parser.add_argument("--motif-prior-eta", type=float, default=0.02)
     parser.add_argument("--behavior-novelty-beta", type=float, default=0.05)
     parser.add_argument("--behavior-archive-size", type=int, default=128)
+    parser.add_argument("--typed-robust-years", default="2014,2015,2016,2017,2018")
+    parser.add_argument("--typed-robust-lambda", type=float, default=0.5)
+    parser.add_argument("--typed-robust-bottom-k", type=int, default=0)
+    parser.add_argument("--qd-cell-capacity", type=int, default=2)
+    parser.add_argument("--qd-behavior-threshold", type=float, default=0.7)
+    parser.add_argument("--qd-bonus", type=float, default=0.02)
+    parser.add_argument("--typed-min-robust-score", type=float, default=-1.0)
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--one-batch", action="store_true")
@@ -394,7 +429,15 @@ def main() -> None:
     files = _load_new_package_files(Path(args.new_dir).resolve())
     seeds = [int(x) for x in _split_csv(args.seeds)]
     methods = _split_csv(args.methods)
-    allowed_methods = {"single_transformer", "multihead", "multihead_intrinsic", "motif_edit", "motif_edit_intrinsic"}
+    allowed_methods = {
+        "single_transformer",
+        "multihead",
+        "multihead_intrinsic",
+        "motif_edit",
+        "motif_edit_intrinsic",
+        "typed_qd",
+        "typed_qd_intrinsic",
+    }
     bad_methods = [m for m in methods if m not in allowed_methods]
     if bad_methods:
         raise ValueError(f"unsupported methods: {bad_methods}")
@@ -463,6 +506,13 @@ def main() -> None:
                         motif_prior_eta=float(args.motif_prior_eta),
                         behavior_novelty_beta=float(args.behavior_novelty_beta),
                         behavior_archive_size=int(args.behavior_archive_size),
+                        typed_robust_years=str(args.typed_robust_years),
+                        typed_robust_lambda=float(args.typed_robust_lambda),
+                        typed_robust_bottom_k=int(args.typed_robust_bottom_k),
+                        qd_cell_capacity=int(args.qd_cell_capacity),
+                        qd_behavior_threshold=float(args.qd_behavior_threshold),
+                        qd_bonus=float(args.qd_bonus),
+                        typed_min_robust_score=float(args.typed_min_robust_score),
                     )
                     if args.dry_run:
                         output = "[dry-run] skipped kaggle kernels push"

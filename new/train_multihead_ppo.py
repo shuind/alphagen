@@ -3,7 +3,7 @@ import json
 import os
 from collections import Counter
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import torch
 from sb3_contrib.ppo_mask import MaskablePPO
@@ -23,6 +23,7 @@ from new.motif_env import MotifEditAlphaEnv, N_ACTIONS as MOTIF_EDIT_ACTIONS
 from new.motif_pool import MotifEditAlphaPool
 from new.policy import MultiHeadMaskablePolicy, MultiHeadTransformerFeatures
 from new.pool import MultiHeadAlphaPool
+from new.typed_qd import TypedQDAlphaPool
 from train_maskable_ppo import CustomCallback
 
 
@@ -37,6 +38,22 @@ def _resolve_steps(pool: int, step: Optional[int]) -> int:
         return int(step)
     default_steps = {10: 64_000, 20: 64_000, 50: 200_000}
     return int(default_steps.get(int(pool), 64_000))
+
+
+def _parse_years(text: str, default_start: int, default_end: int) -> List[int]:
+    if not text:
+        return list(range(int(default_start), int(default_end) + 1))
+    years: List[int] = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lhs, rhs = part.split("-", 1)
+            years.extend(range(int(lhs), int(rhs) + 1))
+        else:
+            years.append(int(part))
+    return sorted(dict.fromkeys(years))
 
 
 def main(
@@ -66,6 +83,13 @@ def main(
     motif_prior_eta: float = 0.02,
     behavior_novelty_beta: float = 0.05,
     behavior_archive_size: int = 128,
+    typed_robust_years: str = "2014,2015,2016,2017,2018",
+    typed_robust_lambda: float = 0.5,
+    typed_robust_bottom_k: int = 0,
+    qd_cell_capacity: int = 2,
+    qd_behavior_threshold: float = 0.7,
+    qd_bonus: float = 0.02,
+    typed_min_robust_score: float = -1.0,
     save_model_ckpt: bool = False,
     reward_per_step: float = REWARD_PER_STEP,
     run_name: str = "",
@@ -103,10 +127,10 @@ def main(
     target = Ref(close, -20) / close - 1
     train_start_time = "2014-01-01"
     train_end_time = "2018-12-31"
-    valid_start_time = "2020-01-01"
-    valid_end_time = "2020-12-31"
-    test_start_time = "2021-01-01"
-    test_end_time = "2022-12-31"
+    valid_start_time = "2019-01-01"
+    valid_end_time = "2019-12-31"
+    test_start_time = "2019-01-01"
+    test_end_time = "2019-12-31"
     max_backtrack_days = 100
     max_future_days = 30
 
@@ -139,14 +163,62 @@ def main(
     calculator_test = QLibStockDataCalculator(data_test, target)
 
     token_methods = {"single_transformer", "multihead", "multihead_intrinsic"}
-    token_multihead_methods = {"multihead", "multihead_intrinsic"}
+    typed_methods = {"typed_qd", "typed_qd_intrinsic"}
+    token_multihead_methods = {"multihead", "multihead_intrinsic"} | typed_methods
     motif_methods = {"motif_edit", "motif_edit_intrinsic"}
-    if method not in token_methods | motif_methods:
+    if method not in token_methods | motif_methods | typed_methods:
         raise ValueError(f"unsupported method: {method}")
 
-    if method in motif_methods:
+    robust_years: List[int] = []
+    robust_calculators = []
+    if method in typed_methods:
+        robust_years = _parse_years(typed_robust_years, int(train_start_time[:4]), int(train_end_time[:4]))
+        for year in robust_years:
+            yearly_data = StockData(
+                instrument=market,
+                start_time=f"{year}-01-01",
+                end_time=f"{year}-12-31",
+                max_backtrack_days=max_backtrack_days,
+                max_future_days=max_future_days,
+                device=torch_device,
+            )
+            robust_calculators.append(QLibStockDataCalculator(yearly_data, target))
+        print(
+            "[typed-qd] "
+            f"robust_years={robust_years} lambda={float(typed_robust_lambda)} "
+            f"bottom_k={int(typed_robust_bottom_k)} cell_capacity={int(qd_cell_capacity)}"
+        )
+
+    if method in typed_methods:
+        beta = float(qd_bonus) if method == "typed_qd_intrinsic" else 0.0
+        pool: AlphaPoolBase = TypedQDAlphaPool(
+            capacity=pool_capacity,
+            calculator=calculator_train,
+            ic_lower_bound=None,
+            l1_alpha=5e-3,
+            re_mode="ensemble",
+            robust_calculators=robust_calculators,
+            robust_lambda=float(typed_robust_lambda),
+            robust_bottom_k=int(typed_robust_bottom_k),
+            qd_cell_capacity=int(qd_cell_capacity),
+            qd_behavior_threshold=float(qd_behavior_threshold),
+            qd_bonus=beta,
+            min_robust_score=float(typed_min_robust_score),
+            profile_timing=True,
+            optimize_every=optimize_every,
+            optimize_n_iter=optimize_n_iter,
+            device=torch_device,
+        )
+        env = MultiHeadAlphaEnv(
+            pool=pool,
+            method=method,
+            device=torch_device,
+            print_expr=False,
+            reward_per_step=reward_per_step,
+        )
+    elif method in motif_methods:
         beta = float(behavior_novelty_beta) if method == "motif_edit_intrinsic" else 0.0
-        pool: AlphaPoolBase = MotifEditAlphaPool(
+        pool = MotifEditAlphaPool(
             capacity=pool_capacity,
             calculator=calculator_train,
             ic_lower_bound=None,
@@ -248,6 +320,14 @@ def main(
         "behavior_archive_size": int(behavior_archive_size),
         "motif_summary": motif_summary() if method in motif_methods else {},
         "motif_edit_action_count": int(MOTIF_EDIT_ACTIONS) if method in motif_methods else 0,
+        "typed_qd_method": bool(method in typed_methods),
+        "typed_robust_years": robust_years,
+        "typed_robust_lambda": float(typed_robust_lambda),
+        "typed_robust_bottom_k": int(typed_robust_bottom_k),
+        "qd_cell_capacity": int(qd_cell_capacity),
+        "qd_behavior_threshold": float(qd_behavior_threshold),
+        "qd_bonus": float(beta if method in typed_methods else 0.0),
+        "typed_min_robust_score": float(typed_min_robust_score),
         "simple_bias": simple_bias,
         "ts_bias": ts_bias,
         "optimize_every": optimize_every,
@@ -316,6 +396,7 @@ def main(
             verbose=verbose,
         )
     else:
+        token_n_steps = max(64, min(2048, int(steps)))
         model = MaskablePPO(
             MultiHeadMaskablePolicy,
             env,
@@ -334,7 +415,8 @@ def main(
             ),
             gamma=1.0,
             ent_coef=0.01,
-            batch_size=128,
+            n_steps=token_n_steps,
+            batch_size=min(128, token_n_steps),
             tensorboard_log=tb_run_dir,
             device=torch_device,
             verbose=verbose,
@@ -418,7 +500,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--step", "--steps", dest="step", type=int, default=None)
     parser.add_argument(
         "--method",
-        choices=["single_transformer", "multihead", "multihead_intrinsic", "motif_edit", "motif_edit_intrinsic"],
+        choices=[
+            "single_transformer",
+            "multihead",
+            "multihead_intrinsic",
+            "motif_edit",
+            "motif_edit_intrinsic",
+            "typed_qd",
+            "typed_qd_intrinsic",
+        ],
         default="multihead_intrinsic",
     )
     parser.add_argument("--intrinsic-beta", type=float, default=0.1)
@@ -444,6 +534,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--motif-prior-eta", type=float, default=0.02)
     parser.add_argument("--behavior-novelty-beta", type=float, default=0.05)
     parser.add_argument("--behavior-archive-size", type=int, default=128)
+    parser.add_argument("--typed-robust-years", type=str, default="2014,2015,2016,2017,2018")
+    parser.add_argument("--typed-robust-lambda", type=float, default=0.5)
+    parser.add_argument("--typed-robust-bottom-k", type=int, default=0)
+    parser.add_argument("--qd-cell-capacity", type=int, default=2)
+    parser.add_argument("--qd-behavior-threshold", type=float, default=0.7)
+    parser.add_argument("--qd-bonus", type=float, default=0.02)
+    parser.add_argument("--typed-min-robust-score", type=float, default=-1.0)
     parser.add_argument("--save_model_ckpt", action="store_true")
     parser.add_argument("--reward_per_step", type=float, default=REWARD_PER_STEP)
     parser.add_argument("--run_name", type=str, default="")
@@ -492,6 +589,13 @@ if __name__ == "__main__":
         motif_prior_eta=args.motif_prior_eta,
         behavior_novelty_beta=args.behavior_novelty_beta,
         behavior_archive_size=args.behavior_archive_size,
+        typed_robust_years=args.typed_robust_years,
+        typed_robust_lambda=args.typed_robust_lambda,
+        typed_robust_bottom_k=args.typed_robust_bottom_k,
+        qd_cell_capacity=args.qd_cell_capacity,
+        qd_behavior_threshold=args.qd_behavior_threshold,
+        qd_bonus=args.qd_bonus,
+        typed_min_robust_score=args.typed_min_robust_score,
         save_model_ckpt=args.save_model_ckpt,
         reward_per_step=args.reward_per_step,
         run_name=args.run_name,

@@ -183,6 +183,11 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
     edit_paths = payload.get("edit_paths", [])
     naturalness_scores = payload.get("naturalness_scores", [])
     behavior_novelty_scores = payload.get("behavior_novelty_scores", [])
+    qd_descriptors = payload.get("qd_descriptors", [])
+    robust_scores = payload.get("robust_scores", [])
+    type_roots = payload.get("type_roots", [])
+    type_styles = payload.get("type_styles", [])
+    behavior_clusters = payload.get("behavior_clusters", [])
     meta = _find_run_meta(runs_root, run_id)
     step = _step_from_path(pool_path)
 
@@ -195,12 +200,18 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
     head_counts = Counter(source_heads[: len(exprs)])
     motif_counts = Counter(str(x) for x in motif_ids[: len(exprs)] if x)
     motif_family_counts = Counter(str(x) for x in motif_families[: len(exprs)] if x)
+    qd_counts = Counter(str(x) for x in qd_descriptors[: len(exprs)] if x)
+    type_style_counts = Counter(str(x) for x in type_styles[: len(exprs)] if x)
     naturalness_values = [
         float(x) for x in naturalness_scores[: len(exprs)]
         if x is not None and str(x) != ""
     ]
     behavior_values = [
         float(x) for x in behavior_novelty_scores[: len(exprs)]
+        if x is not None and str(x) != ""
+    ]
+    robust_values = [
+        float(x) for x in robust_scores[: len(exprs)]
         if x is not None and str(x) != ""
     ]
     aligned = [
@@ -253,6 +264,12 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
         "mean_naturalness_score": _safe_mean(naturalness_values),
         "mean_behavior_novelty_score": _safe_mean(behavior_values),
         "motif_trace_ratio": (sum(1 for x in motif_ids[:n] if x) / n) if n else 0.0,
+        "qd_coverage": len(qd_counts),
+        "qd_descriptor_counts": json.dumps(dict(qd_counts), ensure_ascii=False),
+        "top_qd_descriptors": json.dumps(qd_counts.most_common(8), ensure_ascii=False),
+        "mean_robust_score": _safe_mean(robust_values),
+        "type_style_counts": json.dumps(dict(type_style_counts), ensure_ascii=False),
+        "behavior_cluster_count": len(set(x for x in behavior_clusters[:n] if x is not None and str(x) != "")),
     }
     for head in HEADS:
         row[f"head_{head}_count"] = int(head_counts.get(head, 0))
@@ -276,6 +293,11 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
                 "edit_path": json.dumps(edit_paths[idx], ensure_ascii=False) if idx < len(edit_paths) else "",
                 "naturalness_score": naturalness_scores[idx] if idx < len(naturalness_scores) else "",
                 "behavior_novelty_score": behavior_novelty_scores[idx] if idx < len(behavior_novelty_scores) else "",
+                "qd_descriptor": qd_descriptors[idx] if idx < len(qd_descriptors) else "",
+                "robust_score": robust_scores[idx] if idx < len(robust_scores) else "",
+                "type_root": type_roots[idx] if idx < len(type_roots) else "",
+                "type_style": type_styles[idx] if idx < len(type_styles) else "",
+                "behavior_cluster": behavior_clusters[idx] if idx < len(behavior_clusters) else "",
                 "node_count": int(stats["node_count"]),
                 "depth": int(stats["depth"]),
                 "risky_op_ratio": round(stats["risky_op_ratio"], 4),
@@ -320,8 +342,8 @@ def _write_markdown(path: Path, rows: List[Dict], examples: List[Dict]) -> None:
 
     lines.extend(
         [
-            "| run_id | method | step | n | node | depth | risky | trend | volatility | volume | corr | rank | simple | align | abnormal | natural | novelty | motif trace | head counts | top motifs |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+            "| run_id | method | step | n | node | depth | risky | trend | volatility | volume | corr | rank | simple | align | abnormal | robust | qd coverage | behavior clusters | natural | novelty | head counts | top motifs | top qd |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
         ]
     )
     for row in latest_by_run.values():
@@ -331,8 +353,9 @@ def _write_markdown(path: Path, rows: List[Dict], examples: List[Dict]) -> None:
             "{volatility_expr_ratio:.3f} | {volume_expr_ratio:.3f} | {corr_expr_ratio:.3f} | "
             "{rank_expr_ratio:.3f} | {simple_expr_ratio:.3f} | "
             "{classic_head_alignment_ratio:.3f} | {abnormal_nesting_ratio:.3f} | "
+            "{mean_robust_score:.3f} | {qd_coverage} | {behavior_cluster_count} | "
             "{mean_naturalness_score:.3f} | {mean_behavior_novelty_score:.3f} | "
-            "{motif_trace_ratio:.3f} | `{source_head_counts}` | `{top_motifs}` |".format(**row)
+            "`{source_head_counts}` | `{top_motifs}` | `{top_qd_descriptors}` |".format(**row)
         )
 
     lines.extend(["", "## Representative Factors", ""])
@@ -342,6 +365,8 @@ def _write_markdown(path: Path, rows: List[Dict], examples: List[Dict]) -> None:
         lines.append(
             f"- `{example['run_id']}` step={example['step']} rank={example['rank']} "
             f"head={example['source_head']} motif={example.get('motif_id', '')} "
+            f"qd={example.get('qd_descriptor', '')} robust={example.get('robust_score', '')} "
+            f"type={example.get('type_style', '')}/{example.get('type_root', '')} "
             f"family={example.get('motif_family', '')} weight={example['weight']} "
             f"nodes={example['node_count']} depth={example['depth']} risky={example['risky_op_ratio']} "
             f"trend={example['has_trend']} vol={example['has_volatility']} volume={example['has_volume']} "
