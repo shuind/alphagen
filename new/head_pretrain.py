@@ -39,6 +39,7 @@ TOKEN_OP_RE = re.compile(r"^[A-Z][A-Za-z0-9_]*$")
 
 def parse_loss_weights(text: str = DEFAULT_LOSS_WEIGHTS) -> Dict[str, float]:
     weights = {"next": 1.0, "head": 0.2, "attr": 0.2}
+    aliases = {"strategy": "head"}
     if not text:
         return weights
     for chunk in text.split(","):
@@ -47,7 +48,7 @@ def parse_loss_weights(text: str = DEFAULT_LOSS_WEIGHTS) -> Dict[str, float]:
         if "=" not in chunk:
             raise ValueError(f"invalid pretrain loss weight chunk: {chunk}")
         key, value = chunk.split("=", 1)
-        key = key.strip()
+        key = aliases.get(key.strip(), key.strip())
         if key not in weights:
             raise ValueError(f"unsupported pretrain loss key: {key}")
         weights[key] = float(value)
@@ -457,9 +458,11 @@ def pretrain_policy_heads(
         "sample_count": int(n),
         "full_expr_sample_count": int(n_full),
         "factor_head_counts": dict(Counter(f.head for f in factors)),
+        "factor_strategy_counts": dict(Counter(f.head for f in factors)),
         "factor_family_counts": dict(Counter((f.family or f.head) for f in factors)),
         "factor_source_counts": dict(Counter(f.source for f in factors)),
         "sample_head_counts": dict(Counter(str(x) for x in sample_heads)),
+        "sample_strategy_counts": dict(Counter(str(x) for x in sample_heads)),
         "sample_family_counts": dict(Counter(str(x) for x in sample_families)),
         "loss_start": float(losses[0]) if losses else None,
         "loss_end": float(losses[-1]) if losses else None,

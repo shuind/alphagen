@@ -18,12 +18,14 @@ class MotifEditAlphaPool(AlphaPool):
         behavior_novelty_beta: float = 0.0,
         motif_prior_eta: float = 0.02,
         behavior_archive_size: int = 128,
+        behavior_novelty_strategies: Optional[List[str]] = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, reward_mode="re", lambda_ri=0.0, **kwargs)
         self.behavior_novelty_beta = float(behavior_novelty_beta)
         self.motif_prior_eta = float(motif_prior_eta)
         self.behavior_archive_size = max(0, int(behavior_archive_size))
+        self.behavior_novelty_strategies = None if behavior_novelty_strategies is None else set(behavior_novelty_strategies)
         self.behavior_archive: Deque[Expression] = deque(maxlen=self.behavior_archive_size)
 
         self.expr_source_heads: List[Optional[str]] = [None for _ in range(self.capacity + 1)]
@@ -92,6 +94,7 @@ class MotifEditAlphaPool(AlphaPool):
                 "invalid": True,
                 "invalid_reason": "naturalness_failed",
                 "source_head": source_head,
+                "source_strategy": source_head,
                 "motif_id": motif_id,
                 "motif_family": motif_family,
                 "edit_path": edit_path,
@@ -113,6 +116,7 @@ class MotifEditAlphaPool(AlphaPool):
         info.update(
             {
                 "source_head": source_head,
+                "source_strategy": source_head,
                 "motif_id": motif_id,
                 "motif_family": motif_family,
                 "edit_path": edit_path,
@@ -131,12 +135,14 @@ class MotifEditAlphaPool(AlphaPool):
             return reward, info
 
         self.head_valid[source_head] += 1
-        behavior_reward = self.behavior_novelty_beta * behavior_novelty
-        naturalness_reward = self.motif_prior_eta * float(naturalness_score)
+        novelty_enabled = self.behavior_novelty_strategies is None or source_head in self.behavior_novelty_strategies
+        behavior_reward = (self.behavior_novelty_beta * behavior_novelty) if novelty_enabled else 0.0
+        has_motif_trace = bool(motif_id or edit_path)
+        naturalness_reward = (self.motif_prior_eta * float(naturalness_score)) if has_motif_trace else 0.0
         reward_total = float(reward + behavior_reward + naturalness_reward)
 
         re_value = float(info.get("re", 0.0))
-        if re_value > 0 and self.behavior_archive_size > 0:
+        if novelty_enabled and re_value > 0 and self.behavior_archive_size > 0:
             self.behavior_archive.append(expr)
 
         expr_text = str(expr)
@@ -156,6 +162,9 @@ class MotifEditAlphaPool(AlphaPool):
                 "head_generated": dict(self.head_generated),
                 "head_valid": dict(self.head_valid),
                 "head_accepted": dict(self.head_accepted),
+                "strategy_generated": dict(self.head_generated),
+                "strategy_valid": dict(self.head_valid),
+                "strategy_accepted": dict(self.head_accepted),
                 "motif_generated": dict(self.motif_generated),
                 "motif_accepted": dict(self.motif_accepted),
                 "motif_family_generated": dict(self.family_generated),
@@ -193,6 +202,7 @@ class MotifEditAlphaPool(AlphaPool):
     def to_dict(self) -> dict:
         payload = super().to_dict()
         payload["source_heads"] = list(self.expr_source_heads[: self.size])
+        payload["source_strategies"] = list(self.expr_source_heads[: self.size])
         payload["motif_ids"] = list(self.expr_motif_ids[: self.size])
         payload["motif_families"] = list(self.expr_motif_families[: self.size])
         payload["edit_paths"] = list(self.expr_edit_paths[: self.size])
@@ -207,11 +217,17 @@ class MotifEditAlphaPool(AlphaPool):
         payload["head_generated"] = dict(self.head_generated)
         payload["head_valid"] = dict(self.head_valid)
         payload["head_accepted"] = dict(self.head_accepted)
+        payload["strategy_generated"] = dict(self.head_generated)
+        payload["strategy_valid"] = dict(self.head_valid)
+        payload["strategy_accepted"] = dict(self.head_accepted)
         payload["motif_generated"] = dict(self.motif_generated)
         payload["motif_accepted"] = dict(self.motif_accepted)
         payload["motif_family_generated"] = dict(self.family_generated)
         payload["motif_family_accepted"] = dict(self.family_accepted)
         payload["behavior_novelty_beta"] = self.behavior_novelty_beta
+        payload["behavior_novelty_strategies"] = (
+            None if self.behavior_novelty_strategies is None else sorted(self.behavior_novelty_strategies)
+        )
         payload["motif_prior_eta"] = self.motif_prior_eta
         payload["behavior_archive_size"] = len(self.behavior_archive)
         payload["behavior_archive_max_size"] = self.behavior_archive_size

@@ -31,6 +31,7 @@ class MultiHeadAlphaPool(AlphaPool):
         reward, info = super().try_new_expr(expr, token_seq=token_seq)
         info = dict(info)
         info["source_head"] = source_head
+        info["source_strategy"] = source_head
 
         if info.get("invalid", False):
             self.last_reward_info = info
@@ -59,6 +60,9 @@ class MultiHeadAlphaPool(AlphaPool):
                 "head_generated": dict(self.head_generated),
                 "head_valid": dict(self.head_valid),
                 "head_accepted": dict(self.head_accepted),
+                "strategy_generated": dict(self.head_generated),
+                "strategy_valid": dict(self.head_valid),
+                "strategy_accepted": dict(self.head_accepted),
             }
         )
         self.last_reward_info = info
@@ -75,10 +79,13 @@ class MultiHeadAlphaPool(AlphaPool):
     def to_dict(self) -> dict:
         payload = super().to_dict()
         payload["source_heads"] = list(self.expr_source_heads[: self.size])
+        payload["source_strategies"] = list(self.expr_source_heads[: self.size])
         payload["head_generated"] = dict(self.head_generated)
         payload["head_valid"] = dict(self.head_valid)
         payload["head_accepted"] = dict(self.head_accepted)
+        payload["strategy_generated"] = dict(self.head_generated)
+        payload["strategy_valid"] = dict(self.head_valid)
+        payload["strategy_accepted"] = dict(self.head_accepted)
         payload["ast_counts"] = self.intrinsic.to_dict()
         payload["intrinsic_beta"] = self.intrinsic_beta
         return payload
-

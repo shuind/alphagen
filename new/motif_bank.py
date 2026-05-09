@@ -41,6 +41,7 @@ from alphagen_qlib.stock_data import FeatureType
 
 
 HEAD_NAMES = ("base", "trend", "volatility", "volume", "corr", "rank", "explore")
+STRATEGY_NAMES = HEAD_NAMES
 FIELD_NAMES = ("close", "vwap", "open", "high", "low", "volume")
 PRICE_FIELDS = ("close", "vwap", "open", "high", "low")
 VOLUME_FIELDS = ("volume", "vwap")
@@ -274,6 +275,7 @@ def motif_summary() -> Dict[str, object]:
     return {
         "motif_count": len(MOTIF_BANK),
         "head_counts": dict(Counter(motif.head for motif in MOTIF_BANK)),
+        "strategy_counts": dict(Counter(motif.head for motif in MOTIF_BANK)),
         "family_counts": dict(Counter(motif.family for motif in MOTIF_BANK)),
     }
 

@@ -16,8 +16,9 @@ from alphagen_qlib.calculator import QLibStockDataCalculator
 from alphagen_qlib.compat import patch_all
 from alphagen_qlib.stock_data import FeatureType, StockData
 from new.classic_factors import DEFAULT_LOSS_WEIGHTS, load_classic_factor_bank
-from new.env import HEAD_NAMES, MultiHeadAlphaEnv
+from new.env import HEAD_NAMES, STRATEGY_NAMES, MultiHeadAlphaEnv
 from new.head_pretrain import parse_loss_weights, pretrain_policy_heads
+from new.hybrid_env import HYBRID_ACTIONS, HybridStrategyAlphaEnv
 from new.motif_bank import motif_summary
 from new.motif_env import MotifEditAlphaEnv, N_ACTIONS as MOTIF_EDIT_ACTIONS
 from new.motif_pool import MotifEditAlphaPool
@@ -61,7 +62,7 @@ def main(
     market: str = "tcsi300",
     pool_capacity: int = 10,
     steps: int = 64_000,
-    method: str = "multihead_intrinsic",
+    method: str = "multi_strategy_intrinsic",
     intrinsic_beta: float = 0.1,
     simple_bias: float = 0.4,
     ts_bias: float = 0.5,
@@ -162,11 +163,18 @@ def main(
     calculator_valid = QLibStockDataCalculator(data_valid, target)
     calculator_test = QLibStockDataCalculator(data_test, target)
 
-    token_methods = {"single_transformer", "multihead", "multihead_intrinsic"}
+    token_methods = {
+        "single_transformer",
+        "multihead",
+        "multihead_intrinsic",
+        "multi_strategy",
+        "multi_strategy_intrinsic",
+    }
     typed_methods = {"typed_only", "typed_robust", "typed_qd", "typed_qd_intrinsic"}
-    token_multihead_methods = {"multihead", "multihead_intrinsic"} | typed_methods
+    token_multihead_methods = {"multihead", "multihead_intrinsic", "multi_strategy", "multi_strategy_intrinsic"} | typed_methods
     motif_methods = {"motif_edit", "motif_edit_intrinsic"}
-    if method not in token_methods | motif_methods | typed_methods:
+    hybrid_methods = {"hybrid_strategy", "hybrid_strategy_intrinsic"}
+    if method not in token_methods | motif_methods | typed_methods | hybrid_methods:
         raise ValueError(f"unsupported method: {method}")
 
     robust_years: List[int] = []
@@ -242,8 +250,33 @@ def main(
             max_edits=int(motif_max_edits),
             reward_per_step=reward_per_step,
         )
+    elif method in hybrid_methods:
+        beta = float(behavior_novelty_beta) if method == "hybrid_strategy_intrinsic" else 0.0
+        pool = MotifEditAlphaPool(
+            capacity=pool_capacity,
+            calculator=calculator_train,
+            ic_lower_bound=None,
+            l1_alpha=5e-3,
+            re_mode="ensemble",
+            behavior_novelty_beta=beta,
+            behavior_novelty_strategies=["explore"],
+            motif_prior_eta=float(motif_prior_eta),
+            behavior_archive_size=int(behavior_archive_size),
+            profile_timing=True,
+            optimize_every=optimize_every,
+            optimize_n_iter=optimize_n_iter,
+            device=torch_device,
+        )
+        env = HybridStrategyAlphaEnv(
+            pool=pool,
+            method=method,
+            max_edits=int(motif_max_edits),
+            reward_per_step=reward_per_step,
+            device=torch_device,
+            print_expr=False,
+        )
     else:
-        beta = float(intrinsic_beta) if method == "multihead_intrinsic" else 0.0
+        beta = float(intrinsic_beta) if method in {"multihead_intrinsic", "multi_strategy_intrinsic"} else 0.0
         pool = MultiHeadAlphaPool(
             capacity=pool_capacity,
             calculator=calculator_train,
@@ -265,7 +298,7 @@ def main(
         )
 
     step_tag = _format_step_tag(int(steps))
-    name_prefix = run_name or f"mh_seed{seed}_{method}_p{pool_capacity}_{step_tag}"
+    name_prefix = run_name or f"ms_seed{seed}_{method}_p{pool_capacity}_{step_tag}"
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     run_id = f"{name_prefix}_{timestamp}"
     ckpt_run_dir = os.path.join(resolved_ckpt_dir, run_id)
@@ -313,17 +346,22 @@ def main(
         "pool_capacity": pool_capacity,
         "steps": steps,
         "method": method,
-        "backbone": "motif_edit_mlp" if method in motif_methods else "shared_transformer",
+        "backbone": "edit_mlp" if method in motif_methods | hybrid_methods else "shared_transformer",
         "head_names": list(HEAD_NAMES),
+        "strategy_names": list(STRATEGY_NAMES),
         "reward_mode": "re",
         "intrinsic_beta": beta,
         "motif_method": bool(method in motif_methods),
+        "hybrid_strategy_method": bool(method in hybrid_methods),
+        "free_token_strategies": ["base", "explore"] if method in hybrid_methods else [],
+        "motif_strategies": ["trend", "volatility", "volume", "corr", "rank"] if method in hybrid_methods else [],
         "motif_max_edits": int(motif_max_edits),
         "motif_prior_eta": float(motif_prior_eta),
-        "behavior_novelty_beta": float(beta if method in motif_methods else 0.0),
+        "behavior_novelty_beta": float(beta if method in motif_methods | hybrid_methods else 0.0),
+        "behavior_novelty_strategies": ["explore"] if method in hybrid_methods and beta > 0 else (None if method in motif_methods else []),
         "behavior_archive_size": int(behavior_archive_size),
-        "motif_summary": motif_summary() if method in motif_methods else {},
-        "motif_edit_action_count": int(MOTIF_EDIT_ACTIONS) if method in motif_methods else 0,
+        "motif_summary": motif_summary() if method in motif_methods | hybrid_methods else {},
+        "motif_edit_action_count": int(MOTIF_EDIT_ACTIONS) if method in motif_methods else (int(HYBRID_ACTIONS) if method in hybrid_methods else 0),
         "typed_qd_method": bool(method in typed_methods),
         "typed_robust_years": robust_years,
         "typed_robust_lambda": float(typed_robust_lambda),
@@ -353,6 +391,7 @@ def main(
         "classic_factor_count": len(classic_factors),
         "classic_factor_skipped_count": len(skipped_classic_factors),
         "classic_factor_head_counts": dict(Counter(f.head for f in classic_factors)),
+        "classic_factor_strategy_counts": dict(Counter(f.head for f in classic_factors)),
         "classic_factor_family_counts": dict(Counter((f.family or f.head) for f in classic_factors)),
         "classic_factor_source_counts": dict(Counter(f.source for f in classic_factors)),
         "classic_factor_stats": classic_factor_stats,
@@ -388,7 +427,7 @@ def main(
         verbose=verbose,
     )
 
-    if method in motif_methods:
+    if method in motif_methods | hybrid_methods:
         motif_n_steps = max(64, min(2048, int(steps)))
         model = MaskablePPO(
             "MlpPolicy",
@@ -510,6 +549,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "single_transformer",
             "multihead",
             "multihead_intrinsic",
+            "multi_strategy",
+            "multi_strategy_intrinsic",
+            "hybrid_strategy",
+            "hybrid_strategy_intrinsic",
             "motif_edit",
             "motif_edit_intrinsic",
             "typed_only",
@@ -517,16 +560,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "typed_qd",
             "typed_qd_intrinsic",
         ],
-        default="multihead_intrinsic",
+        default="multi_strategy_intrinsic",
     )
     parser.add_argument("--intrinsic-beta", type=float, default=0.1)
     parser.add_argument("--simple-bias", type=float, default=0.4)
     parser.add_argument("--ts-bias", type=float, default=0.5)
     parser.add_argument("--optimize_every", type=int, default=2)
     parser.add_argument("--optimize_n_iter", type=int, default=256)
-    parser.add_argument("--head-pretrain-epochs", type=int, default=20)
-    parser.add_argument("--head-pretrain-lr", type=float, default=1e-3)
-    parser.add_argument("--head-pretrain-batch-size", type=int, default=128)
+    parser.add_argument("--strategy-pretrain-epochs", "--head-pretrain-epochs", dest="head_pretrain_epochs", type=int, default=20)
+    parser.add_argument("--strategy-pretrain-lr", "--head-pretrain-lr", dest="head_pretrain_lr", type=float, default=1e-3)
+    parser.add_argument("--strategy-pretrain-batch-size", "--head-pretrain-batch-size", dest="head_pretrain_batch_size", type=int, default=128)
     parser.add_argument("--classic-factor-csv", type=str, default="")
     parser.add_argument("--classic-factor-bank", choices=["builtin_v1", "strong"], default="strong")
     parser.add_argument("--classic-factor-augment", dest="classic_factor_augment", action="store_true")
@@ -534,7 +577,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.set_defaults(classic_factor_augment=True)
     parser.add_argument("--pretrain-loss-weights", type=str, default=DEFAULT_LOSS_WEIGHTS)
     parser.add_argument("--no-pretrain-aux-loss", action="store_true")
-    parser.add_argument("--no-head-pretrain", action="store_true")
+    parser.add_argument("--no-strategy-pretrain", "--no-head-pretrain", dest="no_head_pretrain", action="store_true")
     parser.add_argument("--save-pretrain-ckpt", action="store_true")
     parser.add_argument("--pretrain-ckpt-path", type=str, default="")
     parser.add_argument("--load-pretrain-ckpt", type=str, default="")

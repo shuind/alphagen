@@ -19,7 +19,7 @@ CONSTANT_PATTERN = re.compile(r"^Constant\(([-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?)\)$
 
 OP_BY_NAME = {op.__name__: op for op in OPERATORS}
 HEAD_SET = set(HEAD_NAMES)
-DEFAULT_LOSS_WEIGHTS = "next=1.0,head=0.2,attr=0.2"
+DEFAULT_LOSS_WEIGHTS = "next=1.0,strategy=0.2,attr=0.2"
 HEAD_ALIASES = {
     "simple": "base",
     "ts": "trend",
@@ -457,6 +457,7 @@ def load_classic_factor_bank(
         "deduped_count": len(duplicate_skips),
         "augmented_candidate_count": max(0, len(candidate_records) - len(raw_records)),
         "head_counts": dict(Counter(f.head for f in deduped)),
+        "strategy_counts": dict(Counter(f.head for f in deduped)),
         "family_counts": dict(Counter(f.family for f in deduped)),
         "source_counts": dict(Counter(f.source for f in deduped)),
     }

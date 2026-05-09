@@ -83,7 +83,12 @@ class MotifEditAlphaEnv(gym.Env):
         self._state = None
         self._edit_count = 0
         self._edit_path = []
-        return self._obs(), {"source_head": self.current_head, "head_id": self._head_id}
+        return self._obs(), {
+            "source_head": self.current_head,
+            "source_strategy": self.current_head,
+            "head_id": self._head_id,
+            "strategy_id": self._head_id,
+        }
 
     @property
     def unwrapped(self):  # type: ignore[override]
@@ -207,10 +212,12 @@ class MotifEditAlphaEnv(gym.Env):
 
         info = dict(info)
         info.setdefault("source_head", self.current_head)
+        info.setdefault("source_strategy", self.current_head)
         info.setdefault("motif_id", motif.motif_id)
         info.setdefault("motif_family", motif.family)
         info.setdefault("edit_path", list(self._edit_path))
         info["head_id"] = self._head_id
+        info["strategy_id"] = self._head_id
         info["reward_raw"] = float(reward)
         info["reward_step"] = float(self.reward_per_step)
         info["reward_total_env"] = float(reward + self.reward_per_step)
@@ -220,13 +227,18 @@ class MotifEditAlphaEnv(gym.Env):
         action = int(action)
         masks = self.action_masks()
         if action < 0 or action >= N_ACTIONS or not bool(masks[action]):
-            return self._obs(), -1.0, True, False, {"invalid_action": int(action), "source_head": self.current_head}
+            return self._obs(), -1.0, True, False, {
+                "invalid_action": int(action),
+                "source_head": self.current_head,
+                "source_strategy": self.current_head,
+            }
 
         if self._state is None:
             self._state = default_state(action)
             self._edit_path = [f"motif:{MOTIF_BANK[action].motif_id}"]
             return self._obs(), float(self.reward_per_step), False, False, {
                 "source_head": self.current_head,
+                "source_strategy": self.current_head,
                 "motif_id": MOTIF_BANK[action].motif_id,
                 "motif_family": MOTIF_BANK[action].family,
             }
@@ -241,6 +253,7 @@ class MotifEditAlphaEnv(gym.Env):
             ]
             return self._obs(), float(self.reward_per_step), False, False, {
                 "source_head": self.current_head,
+                "source_strategy": self.current_head,
                 "motif_id": MOTIF_BANK[action].motif_id,
                 "motif_family": MOTIF_BANK[action].family,
             }
@@ -251,5 +264,6 @@ class MotifEditAlphaEnv(gym.Env):
         self._apply_edit(kind, value)
         return self._obs(), float(self.reward_per_step), False, False, {
             "source_head": self.current_head,
+            "source_strategy": self.current_head,
             "edit_path": list(self._edit_path),
         }

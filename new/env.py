@@ -25,6 +25,8 @@ from alphagen.rl.env.wrapper import (
 
 HEAD_NAMES = ("base", "trend", "volatility", "volume", "corr", "rank", "explore")
 HEAD_TO_ID = {name: idx for idx, name in enumerate(HEAD_NAMES)}
+STRATEGY_NAMES = HEAD_NAMES
+STRATEGY_TO_ID = HEAD_TO_ID
 
 
 class MultiHeadAlphaEnvCore(AlphaEnvCore):
@@ -43,9 +45,15 @@ class MultiHeadAlphaEnvCore(AlphaEnvCore):
             try_new_expr = getattr(self.pool, "try_new_expr")
             ret, info = try_new_expr(expr, token_seq=token_seq, source_head=self.current_head)
             self.eval_cnt += 1
+            info = dict(info)
+            info.setdefault("source_strategy", self.current_head)
             return ret, info
         except OutOfDataRangeError:
-            return 0.0, {"out_of_data": True, "source_head": self.current_head}
+            return 0.0, {
+                "out_of_data": True,
+                "source_head": self.current_head,
+                "source_strategy": self.current_head,
+            }
 
 
 class MultiHeadAlphaEnvWrapper(gym.Wrapper):
@@ -80,7 +88,12 @@ class MultiHeadAlphaEnvWrapper(gym.Wrapper):
         self.state = np.zeros(MAX_EXPR_LENGTH + 1, dtype=np.uint8)
         self.state[-1] = self._head_id
         self.env.reset()
-        return self.state, {"source_head": self.env.current_head, "head_id": self._head_id}
+        return self.state, {
+            "source_head": self.env.current_head,
+            "source_strategy": self.env.current_head,
+            "head_id": self._head_id,
+            "strategy_id": self._head_id,
+        }
 
     def step(self, action: int):
         _, reward, done, truncated, info = self.env.step(action2token(action))
@@ -91,7 +104,9 @@ class MultiHeadAlphaEnvWrapper(gym.Wrapper):
         total_reward = float(reward + self._reward_per_step)
         info = dict(info) if info is not None else {}
         info.setdefault("source_head", self.env.current_head)
+        info.setdefault("source_strategy", self.env.current_head)
         info["head_id"] = self._head_id
+        info["strategy_id"] = self._head_id
         info["reward_raw"] = float(reward)
         info["reward_step"] = float(self._reward_per_step)
         info["reward_total_env"] = total_reward

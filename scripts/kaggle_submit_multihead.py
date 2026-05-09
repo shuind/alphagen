@@ -85,7 +85,7 @@ for rel_path, content in files.items():
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
-print("Injected local new/ multihead package:", len(files), "files")
+print("Injected local new/ strategy package:", len(files), "files")
 !python -m py_compile {compile_targets}
 """
 
@@ -155,16 +155,16 @@ def _render_train_cell(
     typed_min_robust_score: float,
 ) -> str:
     lines = [
-        f"!python -m new.train_multihead_ppo {seed} {market} {pool} --step {step} \\",
+        f"!python -m new.train_strategy_ppo {seed} {market} {pool} --step {step} \\",
         f"  --method {method} \\",
         f"  --intrinsic-beta {intrinsic_beta} \\",
         f"  --simple-bias {simple_bias} \\",
         f"  --ts-bias {ts_bias} \\",
         f"  --optimize_every {optimize_every} \\",
         f"  --optimize_n_iter {optimize_n_iter} \\",
-        f"  --head-pretrain-epochs {head_pretrain_epochs} \\",
-        f"  --head-pretrain-lr {head_pretrain_lr} \\",
-        f"  --head-pretrain-batch-size {head_pretrain_batch_size} \\",
+        f"  --strategy-pretrain-epochs {head_pretrain_epochs} \\",
+        f"  --strategy-pretrain-lr {head_pretrain_lr} \\",
+        f"  --strategy-pretrain-batch-size {head_pretrain_batch_size} \\",
         f"  --classic-factor-bank {classic_factor_bank} \\",
         f"  --pretrain-loss-weights {json.dumps(pretrain_loss_weights)} \\",
         f"  --motif-max-edits {motif_max_edits} \\",
@@ -188,7 +188,7 @@ def _render_train_cell(
     if no_pretrain_aux_loss:
         lines.append("  --no-pretrain-aux-loss \\")
     if no_head_pretrain:
-        lines.append("  --no-head-pretrain \\")
+        lines.append("  --no-strategy-pretrain \\")
     if save_pretrain_ckpt:
         lines.append("  --save-pretrain-ckpt \\")
     if pretrain_ckpt_path:
@@ -372,8 +372,8 @@ def main() -> None:
     parser.add_argument("--seeds", default="0,1")
     parser.add_argument(
         "--methods",
-        default="single_transformer,multihead,multihead_intrinsic",
-        help="csv: single_transformer,multihead,multihead_intrinsic,motif_edit,motif_edit_intrinsic,typed_only,typed_robust,typed_qd,typed_qd_intrinsic",
+        default="single_transformer,hybrid_strategy,hybrid_strategy_intrinsic",
+        help="csv: single_transformer,multi_strategy,multi_strategy_intrinsic,hybrid_strategy,hybrid_strategy_intrinsic,motif_edit,motif_edit_intrinsic,typed_only,typed_robust,typed_qd,typed_qd_intrinsic",
     )
     parser.add_argument("--market", default="tcsi300")
     parser.add_argument("--pool", type=int, default=10)
@@ -383,17 +383,17 @@ def main() -> None:
     parser.add_argument("--ts-bias", type=float, default=0.5)
     parser.add_argument("--optimize-every", type=int, default=2)
     parser.add_argument("--optimize-n-iter", type=int, default=256)
-    parser.add_argument("--head-pretrain-epochs", type=int, default=20)
-    parser.add_argument("--head-pretrain-lr", type=float, default=1e-3)
-    parser.add_argument("--head-pretrain-batch-size", type=int, default=128)
+    parser.add_argument("--strategy-pretrain-epochs", "--head-pretrain-epochs", dest="head_pretrain_epochs", type=int, default=20)
+    parser.add_argument("--strategy-pretrain-lr", "--head-pretrain-lr", dest="head_pretrain_lr", type=float, default=1e-3)
+    parser.add_argument("--strategy-pretrain-batch-size", "--head-pretrain-batch-size", dest="head_pretrain_batch_size", type=int, default=128)
     parser.add_argument("--classic-factor-csv", default="")
     parser.add_argument("--classic-factor-bank", choices=["builtin_v1", "strong"], default="strong")
     parser.add_argument("--classic-factor-augment", dest="classic_factor_augment", action="store_true")
     parser.add_argument("--no-classic-factor-augment", dest="classic_factor_augment", action="store_false")
     parser.set_defaults(classic_factor_augment=True)
-    parser.add_argument("--pretrain-loss-weights", default="next=1.0,head=0.2,attr=0.2")
+    parser.add_argument("--pretrain-loss-weights", default="next=1.0,strategy=0.2,attr=0.2")
     parser.add_argument("--no-pretrain-aux-loss", action="store_true")
-    parser.add_argument("--no-head-pretrain", action="store_true")
+    parser.add_argument("--no-strategy-pretrain", "--no-head-pretrain", dest="no_head_pretrain", action="store_true")
     parser.add_argument("--save-pretrain-ckpt", action="store_true")
     parser.add_argument("--pretrain-ckpt-path", default="")
     parser.add_argument("--load-pretrain-ckpt", default="")
@@ -411,7 +411,7 @@ def main() -> None:
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--one-batch", action="store_true")
-    parser.add_argument("--state-path", default="data/kaggle_submit_state_multihead.json")
+    parser.add_argument("--state-path", default="data/kaggle_submit_state_strategy.json")
     parser.add_argument("--force-reset", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--max-push-retries", type=int, default=3)
@@ -433,6 +433,10 @@ def main() -> None:
         "single_transformer",
         "multihead",
         "multihead_intrinsic",
+        "multi_strategy",
+        "multi_strategy_intrinsic",
+        "hybrid_strategy",
+        "hybrid_strategy_intrinsic",
         "motif_edit",
         "motif_edit_intrinsic",
         "typed_only",
@@ -473,7 +477,7 @@ def main() -> None:
                     else _detect_notebook_file(kernel_dir)
                 )
                 run_name = (
-                    f"mh_p{args.pool}_seed{job['seed']}_{job['method']}_"
+                    f"ms_p{args.pool}_seed{job['seed']}_{job['method']}_"
                     f"{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 )
                 print(f"  [job] {job['job_id']} -> kernel_dir={kernel_dir.name}")

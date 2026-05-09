@@ -14,7 +14,8 @@ CONSTANT_RE = re.compile(r"Constant\([-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?\)", re.IGN
 STEP_RE = re.compile(r"(\d+)_steps_pool\.json$")
 WINDOW_RE = re.compile(r",(10|20|30|40|50)\)")
 
-HEADS = ("base", "trend", "volatility", "volume", "corr", "rank", "explore")
+STRATEGIES = ("base", "trend", "volatility", "volume", "corr", "rank", "explore")
+HEADS = STRATEGIES  # Backward-compatible output aliases for older checkpoints.
 RISKY_OPS = {"Div", "Log", "Corr", "Cov", "Std", "Var", "Mad"}
 COMPARISON_OPS = {"Greater", "Less"}
 TREND_OPS = {"Ref", "Delta", "Mean", "WMA", "EMA", "TSRank"}
@@ -144,22 +145,26 @@ def _expr_stats(expr: str) -> Dict[str, float]:
     }
 
 
-def _head_preference_match(head: str, stats: Dict[str, float]) -> bool:
-    if head == "trend":
+def _strategy_preference_match(strategy: str, stats: Dict[str, float]) -> bool:
+    if strategy == "trend":
         return bool(stats["has_trend"])
-    if head == "volatility":
+    if strategy == "volatility":
         return bool(stats["has_volatility"])
-    if head == "volume":
+    if strategy == "volume":
         return bool(stats["has_volume"])
-    if head == "corr":
+    if strategy == "corr":
         return bool(stats["has_corr"])
-    if head == "rank":
+    if strategy == "rank":
         return bool(stats["has_rank"])
-    if head == "explore":
+    if strategy == "explore":
         return not bool(stats["abnormal_nesting"])
-    if head == "base":
+    if strategy == "base":
         return True
     return False
+
+
+def _head_preference_match(head: str, stats: Dict[str, float]) -> bool:
+    return _strategy_preference_match(head, stats)
 
 
 def _select_files(files: List[Tuple[str, Path]], step_mode: str) -> List[Tuple[str, Path]]:
@@ -177,7 +182,8 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
     payload = json.loads(pool_path.read_text(encoding="utf-8"))
     exprs = [str(x) for x in payload.get("exprs", []) if str(x)]
     weights = payload.get("weights", [])
-    source_heads = payload.get("source_heads", [])
+    source_strategies = payload.get("source_strategies", payload.get("source_heads", []))
+    source_heads = payload.get("source_heads", source_strategies)
     motif_ids = payload.get("motif_ids", [])
     motif_families = payload.get("motif_families", [])
     edit_paths = payload.get("edit_paths", [])
@@ -197,6 +203,7 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
     op_counts = Counter(op for expr in exprs for op in OP_RE.findall(expr))
     field_counts = Counter(field for expr in exprs for field in FIELD_RE.findall(expr))
     window_counts = Counter(window for expr in exprs for window in WINDOW_RE.findall(expr))
+    strategy_counts = Counter(source_strategies[: len(exprs)])
     head_counts = Counter(source_heads[: len(exprs)])
     motif_counts = Counter(str(x) for x in motif_ids[: len(exprs)] if x)
     motif_family_counts = Counter(str(x) for x in motif_families[: len(exprs)] if x)
@@ -215,7 +222,7 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
         if x is not None and str(x) != ""
     ]
     aligned = [
-        _head_preference_match(source_heads[idx] if idx < len(source_heads) else "", stats)
+        _strategy_preference_match(source_strategies[idx] if idx < len(source_strategies) else "", stats)
         for idx, stats in enumerate(per_expr)
     ]
 
@@ -249,6 +256,7 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
         "corr_expr_ratio": _safe_mean([x["has_corr"] for x in per_expr]),
         "rank_expr_ratio": _safe_mean([x["has_rank"] for x in per_expr]),
         "simple_expr_ratio": _safe_mean([x["is_simple_like"] for x in per_expr]),
+        "classic_strategy_alignment_ratio": (sum(1 for x in aligned if x) / n) if n else 0.0,
         "classic_head_alignment_ratio": (sum(1 for x in aligned if x) / n) if n else 0.0,
         "abnormal_nesting_ratio": _safe_mean([x["abnormal_nesting"] for x in per_expr]),
         "unique_ast_count": len(sig_counts),
@@ -258,6 +266,7 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
         "top_fields": json.dumps(field_counts.most_common(8), ensure_ascii=False),
         "top_windows": json.dumps(window_counts.most_common(8), ensure_ascii=False),
         "source_head_counts": json.dumps(dict(head_counts), ensure_ascii=False),
+        "source_strategy_counts": json.dumps(dict(strategy_counts), ensure_ascii=False),
         "motif_counts": json.dumps(dict(motif_counts), ensure_ascii=False),
         "motif_family_counts": json.dumps(dict(motif_family_counts), ensure_ascii=False),
         "top_motifs": json.dumps(motif_counts.most_common(8), ensure_ascii=False),
@@ -271,9 +280,11 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
         "type_style_counts": json.dumps(dict(type_style_counts), ensure_ascii=False),
         "behavior_cluster_count": len(set(x for x in behavior_clusters[:n] if x is not None and str(x) != "")),
     }
-    for head in HEADS:
-        row[f"head_{head}_count"] = int(head_counts.get(head, 0))
-        row[f"head_{head}_ratio"] = float(head_counts.get(head, 0) / n) if n else 0.0
+    for strategy in STRATEGIES:
+        row[f"strategy_{strategy}_count"] = int(strategy_counts.get(strategy, 0))
+        row[f"strategy_{strategy}_ratio"] = float(strategy_counts.get(strategy, 0) / n) if n else 0.0
+        row[f"head_{strategy}_count"] = int(head_counts.get(strategy, 0))
+        row[f"head_{strategy}_ratio"] = float(head_counts.get(strategy, 0) / n) if n else 0.0
 
     examples: List[Dict] = []
     order = list(range(n))
@@ -288,6 +299,7 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
                 "rank": len(examples) + 1,
                 "weight": float(weights[idx]) if idx < len(weights) else "",
                 "source_head": source_heads[idx] if idx < len(source_heads) else "",
+                "source_strategy": source_strategies[idx] if idx < len(source_strategies) else "",
                 "motif_id": motif_ids[idx] if idx < len(motif_ids) else "",
                 "motif_family": motif_families[idx] if idx < len(motif_families) else "",
                 "edit_path": json.dumps(edit_paths[idx], ensure_ascii=False) if idx < len(edit_paths) else "",
@@ -308,7 +320,8 @@ def _summarize_pool(runs_root: Path, run_id: str, pool_path: Path) -> Tuple[Dict
                 "has_rank": int(stats["has_rank"]),
                 "is_simple_like": int(stats["is_simple_like"]),
                 "abnormal_nesting": int(stats["abnormal_nesting"]),
-                "classic_head_match": int(_head_preference_match(source_heads[idx] if idx < len(source_heads) else "", stats)),
+                "classic_head_match": int(_strategy_preference_match(source_strategies[idx] if idx < len(source_strategies) else "", stats)),
+                "classic_strategy_match": int(_strategy_preference_match(source_strategies[idx] if idx < len(source_strategies) else "", stats)),
                 "expr": exprs[idx],
             }
         )
@@ -342,7 +355,7 @@ def _write_markdown(path: Path, rows: List[Dict], examples: List[Dict]) -> None:
 
     lines.extend(
         [
-            "| run_id | method | step | n | node | depth | risky | trend | volatility | volume | corr | rank | simple | align | abnormal | robust | qd coverage | behavior clusters | natural | novelty | head counts | top motifs | top qd |",
+            "| run_id | method | step | n | node | depth | risky | trend | volatility | volume | corr | rank | simple | align | abnormal | robust | qd coverage | behavior clusters | natural | novelty | strategy counts | top motifs | top qd |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
         ]
     )
@@ -352,10 +365,10 @@ def _write_markdown(path: Path, rows: List[Dict], examples: List[Dict]) -> None:
             "{mean_depth:.2f} | {risky_op_ratio:.3f} | {trend_expr_ratio:.3f} | "
             "{volatility_expr_ratio:.3f} | {volume_expr_ratio:.3f} | {corr_expr_ratio:.3f} | "
             "{rank_expr_ratio:.3f} | {simple_expr_ratio:.3f} | "
-            "{classic_head_alignment_ratio:.3f} | {abnormal_nesting_ratio:.3f} | "
+            "{classic_strategy_alignment_ratio:.3f} | {abnormal_nesting_ratio:.3f} | "
             "{mean_robust_score:.3f} | {qd_coverage} | {behavior_cluster_count} | "
             "{mean_naturalness_score:.3f} | {mean_behavior_novelty_score:.3f} | "
-            "`{source_head_counts}` | `{top_motifs}` | `{top_qd_descriptors}` |".format(**row)
+            "`{source_strategy_counts}` | `{top_motifs}` | `{top_qd_descriptors}` |".format(**row)
         )
 
     lines.extend(["", "## Representative Factors", ""])
@@ -364,14 +377,14 @@ def _write_markdown(path: Path, rows: List[Dict], examples: List[Dict]) -> None:
             continue
         lines.append(
             f"- `{example['run_id']}` step={example['step']} rank={example['rank']} "
-            f"head={example['source_head']} motif={example.get('motif_id', '')} "
+            f"strategy={example.get('source_strategy', example['source_head'])} motif={example.get('motif_id', '')} "
             f"qd={example.get('qd_descriptor', '')} robust={example.get('robust_score', '')} "
             f"type={example.get('type_style', '')}/{example.get('type_root', '')} "
             f"family={example.get('motif_family', '')} weight={example['weight']} "
             f"nodes={example['node_count']} depth={example['depth']} risky={example['risky_op_ratio']} "
             f"trend={example['has_trend']} vol={example['has_volatility']} volume={example['has_volume']} "
             f"corr={example['has_corr']} rank={example['has_rank']} simple={example['is_simple_like']} "
-            f"align={example['classic_head_match']} abnormal={example['abnormal_nesting']} "
+            f"align={example['classic_strategy_match']} abnormal={example['abnormal_nesting']} "
             f"natural={example.get('naturalness_score', '')} novelty={example.get('behavior_novelty_score', '')} "
             f"edits={example.get('edit_path', '')}: "
             f"`{example['expr']}`"

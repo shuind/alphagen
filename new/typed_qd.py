@@ -385,6 +385,7 @@ class TypedQDAlphaPool(AlphaPool):
                 "typed_reasons": typed["reasons"],
                 "typed_stats": typed["stats"],
                 "source_head": source_head,
+                "source_strategy": source_head,
                 "reward_total": -1.0,
                 "reward_pool": 0.0,
                 "re": 0.0,
@@ -433,6 +434,7 @@ class TypedQDAlphaPool(AlphaPool):
                 "behavior_cluster_is_new": bool(behavior_is_new),
                 "behavior_similarity": float(behavior_similarity),
                 "source_head": source_head,
+                "source_strategy": source_head,
                 "reward_total": float(robust_score - 0.05),
                 "reward_pool": 0.0,
                 "re": 0.0,
@@ -460,6 +462,7 @@ class TypedQDAlphaPool(AlphaPool):
                     "qd_accepted": False,
                     "qd_reject_reason": "pool_invalid",
                     "source_head": source_head,
+                    "source_strategy": source_head,
                 }
             )
             self.last_reward_info = info
@@ -470,6 +473,7 @@ class TypedQDAlphaPool(AlphaPool):
         reward_total = float(reward + robust_reward + qd_reward)
         archive_meta = {
             "source_head": source_head,
+            "source_strategy": source_head,
             "style": style,
             "complexity_bin": comp_bin,
             "yearly_rankics": yearly_rankics,
@@ -487,6 +491,7 @@ class TypedQDAlphaPool(AlphaPool):
         info.update(
             {
                 "source_head": source_head,
+                "source_strategy": source_head,
                 "typed_valid": True,
                 "typed_stats": typed["stats"],
                 "typed_style": style,
