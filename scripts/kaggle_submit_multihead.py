@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 
 
 NEW_PACKAGE_MARKER = "# codex-local-new-package-20260506"
+TRAIN_CELL_MARKER = "# codex-strategy-train-cell-20260509"
 
 
 def _now() -> str:
@@ -158,6 +159,7 @@ def _render_train_cell(
     typed_min_robust_score: float,
 ) -> str:
     lines = [
+        TRAIN_CELL_MARKER,
         f"!python -m new.train_strategy_ppo {seed} {market} {pool} --step {step} \\",
         f"  --method {method} \\",
         f"  --intrinsic-beta {intrinsic_beta} \\",
@@ -259,18 +261,20 @@ def _rewrite_notebook(
     cells = payload.setdefault("cells", [])
     # Remove stale train cells from previous submitters. Keep the injected package cell even
     # though it contains the literal string new.train_multihead_ppo inside README content.
-    payload["cells"] = [
-        cell
-        for cell in cells
-        if not (
-            cell.get("cell_type") == "code"
-            and NEW_PACKAGE_MARKER not in "".join(cell.get("source", []))
-            and (
-                "train_maskable_ppo.py" in "".join(cell.get("source", []))
-                or "new.train_multihead_ppo" in "".join(cell.get("source", []))
-            )
+    def _is_stale_train_cell(cell: Dict) -> bool:
+        if cell.get("cell_type") != "code":
+            return False
+        src = "".join(cell.get("source", []))
+        if NEW_PACKAGE_MARKER in src:
+            return False
+        return (
+            TRAIN_CELL_MARKER in src
+            or "train_maskable_ppo.py" in src
+            or "new.train_multihead_ppo" in src
+            or "new.train_strategy_ppo" in src
         )
-    ]
+
+    payload["cells"] = [cell for cell in cells if not _is_stale_train_cell(cell)]
     train_source = _render_train_cell(
         seed=seed,
         market=market,
