@@ -343,6 +343,8 @@ class TypedQDAlphaPool(AlphaPool):
         qd_behavior_threshold: float = 0.7,
         qd_bonus: float = 0.02,
         min_robust_score: float = -1.0,
+        use_robust_reward: bool = True,
+        use_qd_archive: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(*args, reward_mode="re", lambda_ri=0.0, **kwargs)
@@ -351,6 +353,8 @@ class TypedQDAlphaPool(AlphaPool):
         self.robust_bottom_k = int(robust_bottom_k)
         self.qd_bonus = float(qd_bonus)
         self.min_robust_score = float(min_robust_score)
+        self.use_robust_reward = bool(use_robust_reward)
+        self.use_qd_archive = bool(use_qd_archive)
         self.archive = QualityDiversityArchive(qd_cell_capacity, qd_behavior_threshold)
 
         self.expr_qd_descriptors: List[Optional[str]] = [None for _ in range(self.capacity + 1)]
@@ -388,22 +392,28 @@ class TypedQDAlphaPool(AlphaPool):
             self.last_reward_info = info
             return -1.0, info
 
-        robust_score, yearly_rankics, robust_stats = robust_rankic_score(
-            expr,
-            calculators=self.robust_calculators,
-            robust_lambda=self.robust_lambda,
-            bottom_k=self.robust_bottom_k,
-        )
+        if self.use_robust_reward or self.use_qd_archive:
+            robust_score, yearly_rankics, robust_stats = robust_rankic_score(
+                expr,
+                calculators=self.robust_calculators,
+                robust_lambda=self.robust_lambda,
+                bottom_k=self.robust_bottom_k,
+            )
+        else:
+            robust_score, yearly_rankics, robust_stats = 0.0, [], {"mean": math.nan, "std": math.nan, "bottom_mean": math.nan}
         style = expression_style(typed["stats"])
         comp_bin = complexity_bin(typed["stats"])
-        behavior_cluster, behavior_is_new, behavior_similarity = self.archive.assign_behavior_cluster(
-            expr,
-            self._get_mutual_ic_cached,
-        )
+        if self.use_qd_archive:
+            behavior_cluster, behavior_is_new, behavior_similarity = self.archive.assign_behavior_cluster(
+                expr,
+                self._get_mutual_ic_cached,
+            )
+        else:
+            behavior_cluster, behavior_is_new, behavior_similarity = -1, False, 0.0
         descriptor = self.archive.descriptor(style, comp_bin, behavior_cluster)
 
-        accepted_by_score = robust_score >= self.min_robust_score
-        qd_accept, replace_idx = self.archive.would_accept(descriptor, robust_score)
+        accepted_by_score = (not (self.use_robust_reward or self.use_qd_archive)) or robust_score >= self.min_robust_score
+        qd_accept, replace_idx = self.archive.would_accept(descriptor, robust_score) if self.use_qd_archive else (True, -1)
         if not accepted_by_score or not qd_accept:
             reason = "below_min_robust" if not accepted_by_score else "cell_not_improved"
             self.qd_reject_counts[reason] += 1
@@ -455,8 +465,9 @@ class TypedQDAlphaPool(AlphaPool):
             self.last_reward_info = info
             return reward, info
 
-        qd_reward = self.qd_bonus * (1.0 if behavior_is_new else 0.25)
-        reward_total = float(reward + robust_score + qd_reward)
+        qd_reward = self.qd_bonus * (1.0 if behavior_is_new else 0.25) if self.use_qd_archive else 0.0
+        robust_reward = robust_score if self.use_robust_reward else 0.0
+        reward_total = float(reward + robust_reward + qd_reward)
         archive_meta = {
             "source_head": source_head,
             "style": style,
@@ -464,14 +475,15 @@ class TypedQDAlphaPool(AlphaPool):
             "yearly_rankics": yearly_rankics,
             "root_type": typed["stats"].get("root_type", ""),
         }
-        self.archive.commit(
-            expr=expr,
-            descriptor=descriptor,
-            score=robust_score,
-            metadata=archive_meta,
-            behavior_is_new=behavior_is_new,
-            replace_idx=replace_idx,
-        )
+        if self.use_qd_archive:
+            self.archive.commit(
+                expr=expr,
+                descriptor=descriptor,
+                score=robust_score,
+                metadata=archive_meta,
+                behavior_is_new=behavior_is_new,
+                replace_idx=replace_idx,
+            )
         info.update(
             {
                 "source_head": source_head,
@@ -485,7 +497,10 @@ class TypedQDAlphaPool(AlphaPool):
                 "qd_descriptor": descriptor,
                 "qd_accepted": True,
                 "qd_reward": float(qd_reward),
+                "robust_reward": float(robust_reward),
                 "qd_bonus": float(self.qd_bonus),
+                "typed_use_robust_reward": bool(self.use_robust_reward),
+                "typed_use_qd_archive": bool(self.use_qd_archive),
                 "behavior_cluster": int(behavior_cluster),
                 "behavior_cluster_is_new": bool(behavior_is_new),
                 "behavior_similarity": float(behavior_similarity),
@@ -534,5 +549,7 @@ class TypedQDAlphaPool(AlphaPool):
             "robust_bottom_k": self.robust_bottom_k,
             "qd_bonus": self.qd_bonus,
             "min_robust_score": self.min_robust_score,
+            "use_robust_reward": self.use_robust_reward,
+            "use_qd_archive": self.use_qd_archive,
         }
         return payload

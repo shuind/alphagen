@@ -373,7 +373,7 @@ def main() -> None:
     parser.add_argument(
         "--methods",
         default="single_transformer,multihead,multihead_intrinsic",
-        help="csv: single_transformer,multihead,multihead_intrinsic,motif_edit,motif_edit_intrinsic,typed_qd,typed_qd_intrinsic",
+        help="csv: single_transformer,multihead,multihead_intrinsic,motif_edit,motif_edit_intrinsic,typed_only,typed_robust,typed_qd,typed_qd_intrinsic",
     )
     parser.add_argument("--market", default="tcsi300")
     parser.add_argument("--pool", type=int, default=10)
@@ -435,6 +435,8 @@ def main() -> None:
         "multihead_intrinsic",
         "motif_edit",
         "motif_edit_intrinsic",
+        "typed_only",
+        "typed_robust",
         "typed_qd",
         "typed_qd_intrinsic",
     }

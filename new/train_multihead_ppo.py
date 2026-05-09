@@ -163,7 +163,7 @@ def main(
     calculator_test = QLibStockDataCalculator(data_test, target)
 
     token_methods = {"single_transformer", "multihead", "multihead_intrinsic"}
-    typed_methods = {"typed_qd", "typed_qd_intrinsic"}
+    typed_methods = {"typed_only", "typed_robust", "typed_qd", "typed_qd_intrinsic"}
     token_multihead_methods = {"multihead", "multihead_intrinsic"} | typed_methods
     motif_methods = {"motif_edit", "motif_edit_intrinsic"}
     if method not in token_methods | motif_methods | typed_methods:
@@ -191,6 +191,8 @@ def main(
 
     if method in typed_methods:
         beta = float(qd_bonus) if method == "typed_qd_intrinsic" else 0.0
+        use_robust_reward = method in {"typed_robust", "typed_qd", "typed_qd_intrinsic"}
+        use_qd_archive = method in {"typed_qd", "typed_qd_intrinsic"}
         pool: AlphaPoolBase = TypedQDAlphaPool(
             capacity=pool_capacity,
             calculator=calculator_train,
@@ -204,6 +206,8 @@ def main(
             qd_behavior_threshold=float(qd_behavior_threshold),
             qd_bonus=beta,
             min_robust_score=float(typed_min_robust_score),
+            use_robust_reward=use_robust_reward,
+            use_qd_archive=use_qd_archive,
             profile_timing=True,
             optimize_every=optimize_every,
             optimize_n_iter=optimize_n_iter,
@@ -328,6 +332,8 @@ def main(
         "qd_behavior_threshold": float(qd_behavior_threshold),
         "qd_bonus": float(beta if method in typed_methods else 0.0),
         "typed_min_robust_score": float(typed_min_robust_score),
+        "typed_use_robust_reward": bool(method in {"typed_robust", "typed_qd", "typed_qd_intrinsic"}),
+        "typed_use_qd_archive": bool(method in {"typed_qd", "typed_qd_intrinsic"}),
         "simple_bias": simple_bias,
         "ts_bias": ts_bias,
         "optimize_every": optimize_every,
@@ -506,6 +512,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "multihead_intrinsic",
             "motif_edit",
             "motif_edit_intrinsic",
+            "typed_only",
+            "typed_robust",
             "typed_qd",
             "typed_qd_intrinsic",
         ],
