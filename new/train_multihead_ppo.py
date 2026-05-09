@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import time
 from collections import Counter
 from datetime import datetime
 from typing import List, Optional
@@ -57,6 +58,15 @@ def _parse_years(text: str, default_start: int, default_end: int) -> List[int]:
     return sorted(dict.fromkeys(years))
 
 
+def _log_stage(name: str, start_time: Optional[float] = None) -> float:
+    now = time.perf_counter()
+    if start_time is None:
+        print(f"[stage] {name} ...", flush=True)
+    else:
+        print(f"[stage] {name} done elapsed={now - start_time:.2f}s", flush=True)
+    return now
+
+
 def main(
     seed: int = 0,
     market: str = "tcsi300",
@@ -68,6 +78,9 @@ def main(
     ts_bias: float = 0.5,
     optimize_every: int = 2,
     optimize_n_iter: int = 256,
+    ppo_n_steps: int = 0,
+    ppo_batch_size: int = 0,
+    ppo_n_epochs: int = 0,
     head_pretrain_epochs: int = 20,
     head_pretrain_lr: float = 1e-3,
     head_pretrain_batch_size: int = 128,
@@ -135,6 +148,7 @@ def main(
     max_backtrack_days = 100
     max_future_days = 30
 
+    t_stage = _log_stage("build train StockData")
     data_train = StockData(
         instrument=market,
         start_time=train_start_time,
@@ -143,6 +157,8 @@ def main(
         max_future_days=max_future_days,
         device=torch_device,
     )
+    _log_stage("build train StockData", t_stage)
+    t_stage = _log_stage("build valid StockData")
     data_valid = StockData(
         instrument=market,
         start_time=valid_start_time,
@@ -151,6 +167,8 @@ def main(
         max_future_days=max_future_days,
         device=torch_device,
     )
+    _log_stage("build valid StockData", t_stage)
+    t_stage = _log_stage("build test StockData")
     data_test = StockData(
         instrument=market,
         start_time=test_start_time,
@@ -159,9 +177,12 @@ def main(
         max_future_days=max_future_days,
         device=torch_device,
     )
+    _log_stage("build test StockData", t_stage)
+    t_stage = _log_stage("build calculators")
     calculator_train = QLibStockDataCalculator(data_train, target)
     calculator_valid = QLibStockDataCalculator(data_valid, target)
     calculator_test = QLibStockDataCalculator(data_test, target)
+    _log_stage("build calculators", t_stage)
 
     token_methods = {
         "single_transformer",
@@ -376,6 +397,9 @@ def main(
         "ts_bias": ts_bias,
         "optimize_every": optimize_every,
         "optimize_n_iter": optimize_n_iter,
+        "ppo_n_steps": int(ppo_n_steps),
+        "ppo_batch_size": int(ppo_batch_size),
+        "ppo_n_epochs": int(ppo_n_epochs),
         "head_pretrain_enabled": head_pretrain_enabled,
         "head_pretrain_epochs": int(head_pretrain_epochs),
         "head_pretrain_lr": float(head_pretrain_lr),
@@ -414,9 +438,11 @@ def main(
         "timestamp": timestamp,
     }
 
+    callback_freq = max(512, min(10000, max(1, int(steps) // 4)))
+    print(f"[callback] save_freq={callback_freq} show_freq={callback_freq}", flush=True)
     callback = CustomCallback(
-        save_freq=10000,
-        show_freq=10000,
+        save_freq=callback_freq,
+        show_freq=callback_freq,
         save_path=ckpt_run_dir,
         run_dir=run_root_dir,
         valid_calculator=calculator_valid,
@@ -428,20 +454,36 @@ def main(
     )
 
     if method in motif_methods | hybrid_methods:
-        motif_n_steps = max(64, min(2048, int(steps)))
+        default_rollout_cap = 256 if method in hybrid_methods else 2048
+        motif_n_steps = int(ppo_n_steps) if int(ppo_n_steps) > 0 else max(64, min(default_rollout_cap, int(steps)))
+        motif_batch_size = int(ppo_batch_size) if int(ppo_batch_size) > 0 else min(64 if method in hybrid_methods else 128, motif_n_steps)
+        motif_n_epochs = int(ppo_n_epochs) if int(ppo_n_epochs) > 0 else (2 if method in hybrid_methods else 10)
+        print(
+            f"[ppo] policy=MlpPolicy n_steps={motif_n_steps} "
+            f"batch_size={motif_batch_size} n_epochs={motif_n_epochs}",
+            flush=True,
+        )
         model = MaskablePPO(
             "MlpPolicy",
             env,
             gamma=1.0,
             ent_coef=0.01,
             n_steps=motif_n_steps,
-            batch_size=min(128, motif_n_steps),
+            batch_size=motif_batch_size,
+            n_epochs=motif_n_epochs,
             tensorboard_log=tb_run_dir,
             device=torch_device,
             verbose=verbose,
         )
     else:
-        token_n_steps = max(64, min(2048, int(steps)))
+        token_n_steps = int(ppo_n_steps) if int(ppo_n_steps) > 0 else max(64, min(2048, int(steps)))
+        token_batch_size = int(ppo_batch_size) if int(ppo_batch_size) > 0 else min(128, token_n_steps)
+        token_n_epochs = int(ppo_n_epochs) if int(ppo_n_epochs) > 0 else 10
+        print(
+            f"[ppo] policy=MultiHeadMaskablePolicy n_steps={token_n_steps} "
+            f"batch_size={token_batch_size} n_epochs={token_n_epochs}",
+            flush=True,
+        )
         model = MaskablePPO(
             MultiHeadMaskablePolicy,
             env,
@@ -461,7 +503,8 @@ def main(
             gamma=1.0,
             ent_coef=0.01,
             n_steps=token_n_steps,
-            batch_size=min(128, token_n_steps),
+            batch_size=token_batch_size,
+            n_epochs=token_n_epochs,
             tensorboard_log=tb_run_dir,
             device=torch_device,
             verbose=verbose,
@@ -531,7 +574,9 @@ def main(
     run_meta["head_pretrain_summary"] = pretrain_summary
     with open(os.path.join(run_root_dir, "run_meta.json"), "w", encoding="utf-8") as f:
         json.dump(run_meta, f, ensure_ascii=False, indent=2)
+    t_stage = _log_stage("learn")
     model.learn(total_timesteps=steps, callback=callback, tb_log_name=run_id)
+    _log_stage("learn", t_stage)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -567,6 +612,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ts-bias", type=float, default=0.5)
     parser.add_argument("--optimize_every", type=int, default=2)
     parser.add_argument("--optimize_n_iter", type=int, default=256)
+    parser.add_argument("--ppo-n-steps", type=int, default=0)
+    parser.add_argument("--ppo-batch-size", type=int, default=0)
+    parser.add_argument("--ppo-n-epochs", type=int, default=0)
     parser.add_argument("--strategy-pretrain-epochs", "--head-pretrain-epochs", dest="head_pretrain_epochs", type=int, default=20)
     parser.add_argument("--strategy-pretrain-lr", "--head-pretrain-lr", dest="head_pretrain_lr", type=float, default=1e-3)
     parser.add_argument("--strategy-pretrain-batch-size", "--head-pretrain-batch-size", dest="head_pretrain_batch_size", type=int, default=128)
@@ -624,6 +672,9 @@ if __name__ == "__main__":
         ts_bias=args.ts_bias,
         optimize_every=args.optimize_every,
         optimize_n_iter=args.optimize_n_iter,
+        ppo_n_steps=args.ppo_n_steps,
+        ppo_batch_size=args.ppo_batch_size,
+        ppo_n_epochs=args.ppo_n_epochs,
         head_pretrain_epochs=args.head_pretrain_epochs,
         head_pretrain_lr=args.head_pretrain_lr,
         head_pretrain_batch_size=args.head_pretrain_batch_size,
