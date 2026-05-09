@@ -130,6 +130,9 @@ def _render_train_cell(
     ts_bias: float,
     optimize_every: int,
     optimize_n_iter: int,
+    ppo_n_steps: int,
+    ppo_batch_size: int,
+    ppo_n_epochs: int,
     head_pretrain_epochs: int,
     head_pretrain_lr: float,
     head_pretrain_batch_size: int,
@@ -162,6 +165,9 @@ def _render_train_cell(
         f"  --ts-bias {ts_bias} \\",
         f"  --optimize_every {optimize_every} \\",
         f"  --optimize_n_iter {optimize_n_iter} \\",
+        f"  --ppo-n-steps {ppo_n_steps} \\",
+        f"  --ppo-batch-size {ppo_batch_size} \\",
+        f"  --ppo-n-epochs {ppo_n_epochs} \\",
         f"  --strategy-pretrain-epochs {head_pretrain_epochs} \\",
         f"  --strategy-pretrain-lr {head_pretrain_lr} \\",
         f"  --strategy-pretrain-batch-size {head_pretrain_batch_size} \\",
@@ -221,6 +227,9 @@ def _rewrite_notebook(
     ts_bias: float,
     optimize_every: int,
     optimize_n_iter: int,
+    ppo_n_steps: int,
+    ppo_batch_size: int,
+    ppo_n_epochs: int,
     head_pretrain_epochs: int,
     head_pretrain_lr: float,
     head_pretrain_batch_size: int,
@@ -274,6 +283,9 @@ def _rewrite_notebook(
         ts_bias=ts_bias,
         optimize_every=optimize_every,
         optimize_n_iter=optimize_n_iter,
+        ppo_n_steps=ppo_n_steps,
+        ppo_batch_size=ppo_batch_size,
+        ppo_n_epochs=ppo_n_epochs,
         head_pretrain_epochs=head_pretrain_epochs,
         head_pretrain_lr=head_pretrain_lr,
         head_pretrain_batch_size=head_pretrain_batch_size,
@@ -383,6 +395,9 @@ def main() -> None:
     parser.add_argument("--ts-bias", type=float, default=0.5)
     parser.add_argument("--optimize-every", type=int, default=2)
     parser.add_argument("--optimize-n-iter", type=int, default=256)
+    parser.add_argument("--ppo-n-steps", type=int, default=0)
+    parser.add_argument("--ppo-batch-size", type=int, default=0)
+    parser.add_argument("--ppo-n-epochs", type=int, default=0)
     parser.add_argument("--strategy-pretrain-epochs", "--head-pretrain-epochs", dest="head_pretrain_epochs", type=int, default=20)
     parser.add_argument("--strategy-pretrain-lr", "--head-pretrain-lr", dest="head_pretrain_lr", type=float, default=1e-3)
     parser.add_argument("--strategy-pretrain-batch-size", "--head-pretrain-batch-size", dest="head_pretrain_batch_size", type=int, default=128)
@@ -496,6 +511,9 @@ def main() -> None:
                         ts_bias=float(args.ts_bias),
                         optimize_every=int(args.optimize_every),
                         optimize_n_iter=int(args.optimize_n_iter),
+                        ppo_n_steps=int(args.ppo_n_steps),
+                        ppo_batch_size=int(args.ppo_batch_size),
+                        ppo_n_epochs=int(args.ppo_n_epochs),
                         head_pretrain_epochs=int(args.head_pretrain_epochs),
                         head_pretrain_lr=float(args.head_pretrain_lr),
                         head_pretrain_batch_size=int(args.head_pretrain_batch_size),
