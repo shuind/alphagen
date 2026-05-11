@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 
 
 LOCAL_REWARD_PATCH_MARKER = "# codex-local-reward-patch-20260428"
+TRAIN_CELL_MARKER = "# codex-kaggle-baseline-train-cell"
 
 LOCAL_REWARD_PATCH_SOURCE = r"""# codex-local-reward-patch-20260428
 from pathlib import Path
@@ -392,6 +393,11 @@ def _rewrite_notebook(
         _ensure_local_reward_patch_cell(payload)
     else:
         _remove_local_reward_patch_cell(payload)
+    payload["cells"] = [
+        cell
+        for cell in payload.get("cells", [])
+        if TRAIN_CELL_MARKER not in "".join(cell.get("source", []))
+    ]
     for cell in payload.get("cells", []):
         if cell.get("cell_type") != "code":
             continue
@@ -429,7 +435,48 @@ def _rewrite_notebook(
             changed = True
         break
     if not changed:
-        raise RuntimeError(f"no train cell updated in notebook: {notebook_path}")
+        train_source = TRAIN_CELL_MARKER + "\n" + _render_train_cell(
+            source="",
+            seed=seed,
+            market_override=market_override,
+            backbone=backbone,
+            reward_mode=reward_mode,
+            step=step,
+            pool=pool,
+            run_name=run_name,
+            ri_func_backend=ri_func_backend,
+            ri_struct_backend=ri_struct_backend,
+            ri_corr_threshold=ri_corr_threshold,
+            ri_ast_similarity_threshold=ri_ast_similarity_threshold,
+            ri_corr_value_bonus=ri_corr_value_bonus,
+            ri_corr_underexplore_power=ri_corr_underexplore_power,
+            ri_turnover_weight=ri_turnover_weight,
+            ri_turnover_topk=ri_turnover_topk,
+            ri_turnover_baseline=ri_turnover_baseline,
+            ri_turnover_step_stride=ri_turnover_step_stride,
+            train_start_time=train_start_time,
+            train_end_time=train_end_time,
+            valid_start_time=valid_start_time,
+            valid_end_time=valid_end_time,
+            test_start_time=test_start_time,
+            test_end_time=test_end_time,
+        )
+        train_cell = {
+            "cell_type": "code",
+            "execution_count": None,
+            "metadata": {},
+            "outputs": [],
+            "source": train_source.splitlines(keepends=True),
+        }
+        insert_at = len(payload.get("cells", []))
+        for idx, cell in enumerate(payload.get("cells", [])):
+            if (
+                cell.get("cell_type") == "code"
+                and "zip -r /kaggle/working/alphagen_outputs.zip" in "".join(cell.get("source", []))
+            ):
+                insert_at = idx
+                break
+        payload.setdefault("cells", []).insert(insert_at, train_cell)
     notebook_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
