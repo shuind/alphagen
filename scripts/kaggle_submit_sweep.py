@@ -396,7 +396,14 @@ def _rewrite_notebook(
     payload["cells"] = [
         cell
         for cell in payload.get("cells", [])
-        if TRAIN_CELL_MARKER not in "".join(cell.get("source", []))
+        if not (
+            cell.get("cell_type") == "code"
+            and (
+                TRAIN_CELL_MARKER in "".join(cell.get("source", []))
+                or "!python -m new.train_strategy_ppo" in "".join(cell.get("source", []))
+                or "!python -m new.train_multihead_ppo" in "".join(cell.get("source", []))
+            )
+        )
     ]
     for cell in payload.get("cells", []):
         if cell.get("cell_type") != "code":
