@@ -192,6 +192,7 @@ def _choose_flag_value(source: str, flag: str, override: Optional[str], default:
 def _render_train_cell(
     source: str,
     seed: int,
+    market_override: Optional[str],
     backbone: str,
     reward_mode: str,
     step: int,
@@ -207,8 +208,14 @@ def _render_train_cell(
     ri_turnover_topk: Optional[str] = None,
     ri_turnover_baseline: Optional[str] = None,
     ri_turnover_step_stride: Optional[str] = None,
+    train_start_time: Optional[str] = None,
+    train_end_time: Optional[str] = None,
+    valid_start_time: Optional[str] = None,
+    valid_end_time: Optional[str] = None,
+    test_start_time: Optional[str] = None,
+    test_end_time: Optional[str] = None,
 ) -> str:
-    market = _extract_first(r"train_maskable_ppo\.py\s+\d+\s+([^\s\\]+)\s+\d+", source, "tcsi300")
+    market = market_override or _extract_first(r"train_maskable_ppo\.py\s+\d+\s+([^\s\\]+)\s+\d+", source, "tcsi300")
     pool_value = str(pool) if pool is not None else _extract_first(
         r"train_maskable_ppo\.py\s+\d+\s+[^\s\\]+\s+(\d+)",
         source,
@@ -279,6 +286,12 @@ def _render_train_cell(
         "  --profile_timing \\",
         f"  --optimize_every {optimize_every} \\",
         f"  --optimize_n_iter {optimize_n_iter} \\",
+        f"  --train-start-time {train_start_time or '2014-01-01'} \\",
+        f"  --train-end-time {train_end_time or '2018-12-31'} \\",
+        f"  --valid-start-time {valid_start_time or '2019-01-01'} \\",
+        f"  --valid-end-time {valid_end_time or '2019-12-31'} \\",
+        f"  --test-start-time {test_start_time or '2019-01-01'} \\",
+        f"  --test-end-time {test_end_time or '2019-12-31'} \\",
         f"  --logdir {logdir} \\",
         f"  --ckpt_dir {ckpt_dir} \\",
         f"  --tb_dir {tb_dir} \\",
@@ -293,6 +306,7 @@ def _render_train_cell(
 def _update_train_cell_source(
     source: str,
     seed: int,
+    market_override: Optional[str],
     backbone: str,
     reward_mode: str,
     step: int,
@@ -308,12 +322,19 @@ def _update_train_cell_source(
     ri_turnover_topk: Optional[str] = None,
     ri_turnover_baseline: Optional[str] = None,
     ri_turnover_step_stride: Optional[str] = None,
+    train_start_time: Optional[str] = None,
+    train_end_time: Optional[str] = None,
+    valid_start_time: Optional[str] = None,
+    valid_end_time: Optional[str] = None,
+    test_start_time: Optional[str] = None,
+    test_end_time: Optional[str] = None,
 ) -> str:
     if "!python train_maskable_ppo.py" not in source:
         return source
     return _render_train_cell(
         source=source,
         seed=seed,
+        market_override=market_override,
         backbone=backbone,
         reward_mode=reward_mode,
         step=step,
@@ -329,12 +350,19 @@ def _update_train_cell_source(
         ri_turnover_topk=ri_turnover_topk,
         ri_turnover_baseline=ri_turnover_baseline,
         ri_turnover_step_stride=ri_turnover_step_stride,
+        train_start_time=train_start_time,
+        train_end_time=train_end_time,
+        valid_start_time=valid_start_time,
+        valid_end_time=valid_end_time,
+        test_start_time=test_start_time,
+        test_end_time=test_end_time,
     )
 
 
 def _rewrite_notebook(
     notebook_path: Path,
     seed: int,
+    market_override: Optional[str],
     backbone: str,
     reward_mode: str,
     step: int,
@@ -350,6 +378,12 @@ def _rewrite_notebook(
     ri_turnover_topk: Optional[str] = None,
     ri_turnover_baseline: Optional[str] = None,
     ri_turnover_step_stride: Optional[str] = None,
+    train_start_time: Optional[str] = None,
+    train_end_time: Optional[str] = None,
+    valid_start_time: Optional[str] = None,
+    valid_end_time: Optional[str] = None,
+    test_start_time: Optional[str] = None,
+    test_end_time: Optional[str] = None,
     inject_local_reward_patch: bool = False,
 ) -> None:
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
@@ -367,6 +401,7 @@ def _rewrite_notebook(
         new_src = _update_train_cell_source(
             src,
             seed,
+            market_override,
             backbone,
             reward_mode,
             step,
@@ -382,6 +417,12 @@ def _rewrite_notebook(
             ri_turnover_topk=ri_turnover_topk,
             ri_turnover_baseline=ri_turnover_baseline,
             ri_turnover_step_stride=ri_turnover_step_stride,
+            train_start_time=train_start_time,
+            train_end_time=train_end_time,
+            valid_start_time=valid_start_time,
+            valid_end_time=valid_end_time,
+            test_start_time=test_start_time,
+            test_end_time=test_end_time,
         )
         if new_src != src:
             cell["source"] = new_src.splitlines(keepends=True)
@@ -495,6 +536,7 @@ def main() -> None:
     parser.add_argument("--notebook-file", type=str, default="",
                         help="notebook filename inside kernel dir; empty means auto-detect first *.ipynb")
     parser.add_argument("--seeds", type=str, default="0,1")
+    parser.add_argument("--market", type=str, default="")
     parser.add_argument("--backbones", type=str, default="lstm,transformer")
     parser.add_argument("--reward-modes", type=str, default="",
                         help="explicit csv list, e.g. re,re+all,re+func_v2,re+struct_v2+reg_v2,re+all_v2")
@@ -504,7 +546,7 @@ def main() -> None:
                         help="used only when --reward-modes is empty")
     parser.add_argument("--pool", type=int, default=None,
                         help="override train_maskable_ppo pool capacity; empty keeps the notebook value")
-    parser.add_argument("--step", type=int, default=64000)
+    parser.add_argument("--step", type=int, default=128000)
     parser.add_argument("--ri-func-backend", type=str, default="",
                         choices=["", "auto", "mutual_ic", "residual", "corr_cluster"])
     parser.add_argument("--ri-struct-backend", type=str, default="",
@@ -517,6 +559,12 @@ def main() -> None:
     parser.add_argument("--ri-turnover-topk", type=str, default="")
     parser.add_argument("--ri-turnover-baseline", type=str, default="")
     parser.add_argument("--ri-turnover-step-stride", type=str, default="")
+    parser.add_argument("--train-start-time", "--train-start", dest="train_start_time", type=str, default="2014-01-01")
+    parser.add_argument("--train-end-time", "--train-end", dest="train_end_time", type=str, default="2018-12-31")
+    parser.add_argument("--valid-start-time", "--valid-start", dest="valid_start_time", type=str, default="2019-01-01")
+    parser.add_argument("--valid-end-time", "--valid-end", dest="valid_end_time", type=str, default="2019-12-31")
+    parser.add_argument("--test-start-time", "--test-start", dest="test_start_time", type=str, default="2019-01-01")
+    parser.add_argument("--test-end-time", "--test-end", dest="test_end_time", type=str, default="2019-12-31")
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--one-batch", action="store_true",
@@ -580,6 +628,7 @@ def main() -> None:
                     _rewrite_notebook(
                         notebook_path=notebook_path,
                         seed=int(job["seed"]),
+                        market_override=(args.market or None),
                         backbone=str(job["backbone"]),
                         reward_mode=str(job["reward_mode"]),
                         step=int(args.step),
@@ -595,6 +644,12 @@ def main() -> None:
                         ri_turnover_topk=(args.ri_turnover_topk or None),
                         ri_turnover_baseline=(args.ri_turnover_baseline or None),
                         ri_turnover_step_stride=(args.ri_turnover_step_stride or None),
+                        train_start_time=args.train_start_time,
+                        train_end_time=args.train_end_time,
+                        valid_start_time=args.valid_start_time,
+                        valid_end_time=args.valid_end_time,
+                        test_start_time=args.test_start_time,
+                        test_end_time=args.test_end_time,
                         inject_local_reward_patch=bool(args.inject_local_reward_patch),
                     )
                     if args.dry_run:

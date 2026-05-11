@@ -34,6 +34,7 @@ def log_metrics_csv(run_dir: Optional[str], step: int, metrics: dict) -> None:
         "pool_size",
         "best_ic",
         "best_rankic",
+        "test_ic",
         "mean_ic",
         "mean_abs_ic",
         "weighted_mean_ic",
@@ -181,6 +182,7 @@ class CustomCallback(BaseCallback):
         self._test_ensemble_total_sec += max(0.0, time.perf_counter() - t_test0)
         self.logger.record('test/ic', ic_test)
         self.logger.record('test/rank_ic', rank_ic_test)
+        ic_test_value = float(ic_test) if ic_test is not None else math.nan
         rank_ic_test_value = float(rank_ic_test) if rank_ic_test is not None else math.nan
         pool_size = getattr(self.pool, "size", math.nan)
         mean_abs_ic = math.nan
@@ -223,6 +225,7 @@ class CustomCallback(BaseCallback):
                 "pool_size": pool_size,
                 "best_ic": getattr(self.pool, "best_ic_ret", math.nan),
                 "best_rankic": rank_ic_test_value,
+                "test_ic": ic_test_value,
                 "mean_ic": mean_ic,
                 "mean_abs_ic": mean_abs_ic,
                 "weighted_mean_ic": weighted_mean_ic,
@@ -420,6 +423,12 @@ def main(
     provider_uri: str = "",
     ckpt_dir: str = "",
     tb_dir: str = "",
+    train_start_time: str = "2014-01-01",
+    train_end_time: str = "2018-12-31",
+    valid_start_time: str = "2019-01-01",
+    valid_end_time: str = "2019-12-31",
+    test_start_time: str = "2019-01-01",
+    test_end_time: str = "2019-12-31",
     device: str = "auto",
     verbose: int = 0,
 ):
@@ -460,12 +469,6 @@ def main(
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
 
-    train_start_time = '2014-01-01'
-    train_end_time = '2018-12-31'
-    valid_start_time = '2019-01-01'
-    valid_end_time = '2019-12-31'
-    test_start_time = '2019-01-01'
-    test_end_time = '2019-12-31'
     stockdata_max_backtrack_days = 100
     stockdata_max_future_days = 30
 
@@ -751,6 +754,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider_uri", type=str, default="")
     parser.add_argument("--ckpt_dir", type=str, default="")
     parser.add_argument("--tb_dir", type=str, default="")
+    parser.add_argument("--train-start-time", "--train-start", dest="train_start_time", type=str, default="2014-01-01")
+    parser.add_argument("--train-end-time", "--train-end", dest="train_end_time", type=str, default="2018-12-31")
+    parser.add_argument("--valid-start-time", "--valid-start", dest="valid_start_time", type=str, default="2019-01-01")
+    parser.add_argument("--valid-end-time", "--valid-end", dest="valid_end_time", type=str, default="2019-12-31")
+    parser.add_argument("--test-start-time", "--test-start", dest="test_start_time", type=str, default="2019-01-01")
+    parser.add_argument("--test-end-time", "--test-end", dest="test_end_time", type=str, default="2019-12-31")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--verbose", type=int, default=0)
     return parser
@@ -810,6 +819,12 @@ if __name__ == '__main__':
             provider_uri=args.provider_uri,
             ckpt_dir=args.ckpt_dir,
             tb_dir=args.tb_dir,
+            train_start_time=args.train_start_time,
+            train_end_time=args.train_end_time,
+            valid_start_time=args.valid_start_time,
+            valid_end_time=args.valid_end_time,
+            test_start_time=args.test_start_time,
+            test_end_time=args.test_end_time,
             device=args.device,
             verbose=args.verbose,
         )

@@ -157,6 +157,12 @@ def _render_train_cell(
     qd_behavior_threshold: float,
     qd_bonus: float,
     typed_min_robust_score: float,
+    train_start_time: str,
+    train_end_time: str,
+    valid_start_time: str,
+    valid_end_time: str,
+    test_start_time: str,
+    test_end_time: str,
 ) -> str:
     lines = [
         TRAIN_CELL_MARKER,
@@ -186,6 +192,12 @@ def _render_train_cell(
         f"  --qd-behavior-threshold {qd_behavior_threshold} \\",
         f"  --qd-bonus {qd_bonus} \\",
         f"  --typed-min-robust-score {typed_min_robust_score} \\",
+        f"  --train-start-time {train_start_time} \\",
+        f"  --train-end-time {train_end_time} \\",
+        f"  --valid-start-time {valid_start_time} \\",
+        f"  --valid-end-time {valid_end_time} \\",
+        f"  --test-start-time {test_start_time} \\",
+        f"  --test-end-time {test_end_time} \\",
     ]
     if classic_factor_augment:
         lines.append("  --classic-factor-augment \\")
@@ -255,6 +267,12 @@ def _rewrite_notebook(
     qd_behavior_threshold: float,
     qd_bonus: float,
     typed_min_robust_score: float,
+    train_start_time: str,
+    train_end_time: str,
+    valid_start_time: str,
+    valid_end_time: str,
+    test_start_time: str,
+    test_end_time: str,
 ) -> None:
     payload = json.loads(notebook_path.read_text(encoding="utf-8"))
     _ensure_new_package_cell(payload, files)
@@ -313,6 +331,12 @@ def _rewrite_notebook(
         qd_behavior_threshold=qd_behavior_threshold,
         qd_bonus=qd_bonus,
         typed_min_robust_score=typed_min_robust_score,
+        train_start_time=train_start_time,
+        train_end_time=train_end_time,
+        valid_start_time=valid_start_time,
+        valid_end_time=valid_end_time,
+        test_start_time=test_start_time,
+        test_end_time=test_end_time,
     )
     train_cell = {
         "cell_type": "code",
@@ -393,7 +417,7 @@ def main() -> None:
     )
     parser.add_argument("--market", default="tcsi300")
     parser.add_argument("--pool", type=int, default=10)
-    parser.add_argument("--step", type=int, default=64000)
+    parser.add_argument("--step", type=int, default=128000)
     parser.add_argument("--intrinsic-beta", type=float, default=0.1)
     parser.add_argument("--simple-bias", type=float, default=0.4)
     parser.add_argument("--ts-bias", type=float, default=0.5)
@@ -427,6 +451,12 @@ def main() -> None:
     parser.add_argument("--qd-behavior-threshold", type=float, default=0.7)
     parser.add_argument("--qd-bonus", type=float, default=0.02)
     parser.add_argument("--typed-min-robust-score", type=float, default=-1.0)
+    parser.add_argument("--train-start-time", "--train-start", dest="train_start_time", default="2014-01-01")
+    parser.add_argument("--train-end-time", "--train-end", dest="train_end_time", default="2018-12-31")
+    parser.add_argument("--valid-start-time", "--valid-start", dest="valid_start_time", default="2019-01-01")
+    parser.add_argument("--valid-end-time", "--valid-end", dest="valid_end_time", default="2019-12-31")
+    parser.add_argument("--test-start-time", "--test-start", dest="test_start_time", default="2019-01-01")
+    parser.add_argument("--test-end-time", "--test-end", dest="test_end_time", default="2019-12-31")
     parser.add_argument("--submit-batch-size", type=int, default=2)
     parser.add_argument("--interval-minutes", type=float, default=24.0)
     parser.add_argument("--one-batch", action="store_true")
@@ -541,6 +571,12 @@ def main() -> None:
                         qd_behavior_threshold=float(args.qd_behavior_threshold),
                         qd_bonus=float(args.qd_bonus),
                         typed_min_robust_score=float(args.typed_min_robust_score),
+                        train_start_time=str(args.train_start_time),
+                        train_end_time=str(args.train_end_time),
+                        valid_start_time=str(args.valid_start_time),
+                        valid_end_time=str(args.valid_end_time),
+                        test_start_time=str(args.test_start_time),
+                        test_end_time=str(args.test_end_time),
                     )
                     if args.dry_run:
                         output = "[dry-run] skipped kaggle kernels push"

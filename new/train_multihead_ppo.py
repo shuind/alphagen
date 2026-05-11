@@ -38,8 +38,8 @@ def _format_step_tag(steps: int) -> str:
 def _resolve_steps(pool: int, step: Optional[int]) -> int:
     if step is not None:
         return int(step)
-    default_steps = {10: 64_000, 20: 64_000, 50: 200_000}
-    return int(default_steps.get(int(pool), 64_000))
+    default_steps = {10: 128_000, 20: 128_000, 50: 400_000}
+    return int(default_steps.get(int(pool), 128_000))
 
 
 def _parse_years(text: str, default_start: int, default_end: int) -> List[int]:
@@ -71,7 +71,7 @@ def main(
     seed: int = 0,
     market: str = "tcsi300",
     pool_capacity: int = 10,
-    steps: int = 64_000,
+    steps: int = 128_000,
     method: str = "multi_strategy_intrinsic",
     intrinsic_beta: float = 0.1,
     simple_bias: float = 0.4,
@@ -111,6 +111,12 @@ def main(
     provider_uri: str = "",
     ckpt_dir: str = "",
     tb_dir: str = "",
+    train_start_time: str = "2014-01-01",
+    train_end_time: str = "2018-12-31",
+    valid_start_time: str = "2019-01-01",
+    valid_end_time: str = "2019-12-31",
+    test_start_time: str = "2019-01-01",
+    test_end_time: str = "2019-12-31",
     device: str = "auto",
     verbose: int = 0,
 ) -> None:
@@ -139,12 +145,6 @@ def main(
 
     close = Feature(FeatureType.CLOSE)
     target = Ref(close, -20) / close - 1
-    train_start_time = "2014-01-01"
-    train_end_time = "2018-12-31"
-    valid_start_time = "2019-01-01"
-    valid_end_time = "2019-12-31"
-    test_start_time = "2019-01-01"
-    test_end_time = "2019-12-31"
     max_backtrack_days = 100
     max_future_days = 30
 
@@ -647,6 +647,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider_uri", type=str, default="")
     parser.add_argument("--ckpt_dir", type=str, default="")
     parser.add_argument("--tb_dir", type=str, default="")
+    parser.add_argument("--train-start-time", "--train-start", dest="train_start_time", type=str, default="2014-01-01")
+    parser.add_argument("--train-end-time", "--train-end", dest="train_end_time", type=str, default="2018-12-31")
+    parser.add_argument("--valid-start-time", "--valid-start", dest="valid_start_time", type=str, default="2019-01-01")
+    parser.add_argument("--valid-end-time", "--valid-end", dest="valid_end_time", type=str, default="2019-12-31")
+    parser.add_argument("--test-start-time", "--test-start", dest="test_start_time", type=str, default="2019-01-01")
+    parser.add_argument("--test-end-time", "--test-end", dest="test_end_time", type=str, default="2019-12-31")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--verbose", type=int, default=0)
     return parser
@@ -705,6 +711,12 @@ if __name__ == "__main__":
         provider_uri=args.provider_uri,
         ckpt_dir=args.ckpt_dir,
         tb_dir=args.tb_dir,
+        train_start_time=args.train_start_time,
+        train_end_time=args.train_end_time,
+        valid_start_time=args.valid_start_time,
+        valid_end_time=args.valid_end_time,
+        test_start_time=args.test_start_time,
+        test_end_time=args.test_end_time,
         device=args.device,
         verbose=args.verbose,
     )
